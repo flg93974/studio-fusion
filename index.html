@@ -222,12 +222,15 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
   // ---------- Constantes ----------
   const TOOLS = [
     { id: 'move', key: 'v', icon: 'move', label: 'Déplacement' },
+    { id: 'transform', key: null, icon: 'transform', label: 'Transformation libre (Ctrl+T)' },
     { id: 'select', key: 'm', icon: 'select', label: 'Sélection rectangulaire' },
     { id: 'wand', key: 'w', icon: 'wand', label: 'Baguette magique' },
     { id: 'lasso', key: 'l', icon: 'lasso', label: 'Lasso polygonal' },
     { id: 'crop', key: 'c', icon: 'crop', label: 'Recadrage' },
     { id: 'brush', key: 'b', icon: 'brush', label: 'Pinceau' },
     { id: 'eraser', key: 'e', icon: 'eraser', label: 'Gomme' },
+    { id: 'clone', key: 's', icon: 'stamp', label: 'Tampon de duplication' },
+    { id: 'heal', key: 'j', icon: 'heal', label: 'Correcteur localisé' },
     { id: 'bucket', key: 'g', icon: 'bucket', label: 'Pot de peinture' },
     { id: 'picker', key: 'i', icon: 'picker', label: 'Pipette' },
     { id: 'text', key: 't', icon: 'type', label: 'Texte' },
@@ -235,7 +238,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     { id: 'ellipse', key: 'o', icon: 'circle', label: 'Ellipse' },
   ];
   const KEYS = {};
-  TOOLS.forEach((t) => { KEYS[t.key] = t.id; });
+  TOOLS.forEach((t) => { if (t.key) KEYS[t.key] = t.id; });
 
   const HINTS = {
     move: 'Glissez pour déplacer le calque ou le masque actif (ou le contenu de la sélection).',
@@ -250,6 +253,9 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     text: 'Saisissez le texte, puis cliquez sur le document (Entrée : position du dernier clic ou centre).',
     rect: 'Glissez pour tracer (Maj : carré).',
     ellipse: 'Glissez pour tracer (Maj : cercle).',
+    transform: 'Glissez dans le cadre pour déplacer, poignées pour mettre à l\'échelle (Maj : libre), poignée ronde pour pivoter (Maj : pas de 15°). Entrée valide, Échap annule.',
+    clone: 'Alt+clic (ou « Définir la source ») pour choisir la source, puis peignez pour dupliquer.',
+    heal: 'Peignez sur un défaut : la zone est remplacée par une texture voisine, raccordée à son pourtour.',
   };
 
   // Modes de fusion (libellés français)
@@ -318,12 +324,18 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
   let revCounter = 0;                  // numéro de version des surfaces (cache des snapshots)
   let scratch = null;                  // canvas de travail pour le rendu masqué
   let opStart = null;                  // opacité avant un réglage au curseur
+  let xf = null;                       // transformation libre en cours (rien n'est écrit avant validation)
+  let cloneSrc = null, cloneOff = null, cloneArmed = false;   // tampon : source, décalage, prise de source
+  let layerEd = null;                  // édition d'un calque de réglage (ses réglages sont appliqués en direct)
+  let multi = new Set();               // sélection multiple de calques (ids)
+  let multiMode = false;               // mode « sélection multiple » (tap = ajouter ou retirer)
+  let rowDrag = null;                  // glisser-déposer d'une ligne de calque
   const opts = {
     size: 20, hardness: 80, opacity: 100, tol: 32,
     font: 'Arial', fontSize: 48, shapeMode: 'fill', stroke: 4,
-    wandTol: 32, wandContig: true,
+    wandTol: 32, wandContig: true, cloneAligned: true, cloneSample: 'layer',
   };
-  const STRING_OPTS = { font: 1, shapeMode: 1 };
+  const STRING_OPTS = { font: 1, shapeMode: 1, cloneSample: 1 };
 
   // ---------- Utilitaires ----------
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
@@ -365,7 +377,13 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
 
   function makeLayer(name, w, h) {
     const c = makeCanvas(w, h);
-    const L = { id: nextId++, name, canvas: c.canvas, ctx: c.ctx, visible: true, opacity: 1, blend: 'normal', mask: null, rev: 0, _snap: null };
+    const L = {
+      id: nextId++, name, canvas: c.canvas, ctx: c.ctx, visible: true, opacity: 1, blend: 'normal', mask: null, rev: 0, _snap: null,
+      type: 'pixel',                   // 'pixel' | 'group' | 'adj' (calque de réglage, sans pixels propres)
+      parent: null,                    // id du groupe (enfants juste sous leur groupe dans l'ordre des calques)
+      open: true,                      // groupe déplié dans la liste
+      adj: null,                       // {kind, params, curve} pour un calque de réglage
+    };
     touch(L);
     return L;
   }
@@ -398,12 +416,49 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     if (!L) return null;
     return isMask ? L.mask : L;
   }
-  // Surface cible des outils de pixels : masque si la cible est « masque », sinon calque
+  // Surface cible des outils de pixels : masque si la cible est « masque », sinon calque de pixels
+  // (un groupe ou un calque de réglage n'a pas de pixels à peindre)
   function editSurface() {
     const L = active();
     if (!L) return null;
-    return editTarget === 'mask' && L.mask ? L.mask : L;
+    if (editTarget === 'mask' && L.mask) return L.mask;
+    return L.type === 'pixel' ? L : null;
   }
+
+  // ---------- Structure : groupes et ordre des calques ----------
+  // Ordre de tableau (du bas vers le haut) : chaque groupe est précédé de ses enfants, sans imbrication.
+  const groupOf = (L) => (L && L.parent != null ? layers.find((g) => g.id === L.parent && g.type === 'group') || null : null);
+  function normalizeLayers() {
+    const gids = new Set(layers.filter((l) => l.type === 'group').map((l) => l.id));
+    layers.forEach((l) => {
+      if (l.type === 'group') l.parent = null;
+      else if (l.parent != null && !gids.has(l.parent)) l.parent = null;
+    });
+    const out = [];
+    for (const L of layers) {
+      if (L.parent != null) continue;
+      if (L.type === 'group') {
+        layers.forEach((c) => { if (c.parent === L.id) out.push(c); });
+        out.push(L);
+      } else out.push(L);
+    }
+    layers = out;
+  }
+  // Lignes de premier niveau, de haut en bas : {head, kids} (un groupe emporte ses enfants)
+  function topItems() {
+    const items = [];
+    for (const r of layers.slice().reverse()) {
+      const last = items[items.length - 1];
+      if (r.type !== 'group' && r.parent != null && last && last.head.id === r.parent) last.kids.push(r);
+      else items.push({ head: r, kids: [] });
+    }
+    return items;
+  }
+  const itemsToLayers = (items) => {
+    const rows = [];
+    items.forEach((it) => rows.push(it.head, ...it.kids));
+    return rows.reverse();
+  };
 
   function hexToRgb(hex) {
     const n = parseInt(hex.slice(1), 16);
@@ -735,15 +790,133 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     return null;
   }
 
-  // preview = true : la vue montre l'aperçu ; false : pixels réels (export)
-  function drawLayer(ctx, L, preview) {
-    if (!L.visible || L.opacity <= 0) return;
-    ctx.globalAlpha = L.opacity;
+  // Masque d'un calque ou d'un groupe ramené à la taille ctx : canvas dont l'alpha = luminance du masque
+  function alphaFromGray(cv) {
+    const cx = cv.getContext('2d', { willReadFrequently: true });
+    const img = cx.getImageData(0, 0, cv.width, cv.height);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) { d[i + 3] = d[i]; d[i] = d[i + 1] = d[i + 2] = 255; }
+    const out = makeCanvas(cv.width, cv.height);
+    out.ctx.putImageData(img, 0, 0);
+    return out.canvas;
+  }
+  function alphaCanvasFor(M, w, h) {
+    if (M.canvas.width === w && M.canvas.height === h) {
+      if (!M.alpha || M.alphaRev !== M.rev) rebuildAlpha(M);
+      return M.alpha.canvas;
+    }
+    const c = makeCanvas(w, h);
+    c.ctx.imageSmoothingQuality = 'high';
+    c.ctx.drawImage(M.canvas, 0, 0, w, h);
+    return alphaFromGray(c.canvas);
+  }
+
+  // preview = true : la vue montre l'aperçu ; false : pixels réels (export). mul : opacité du groupe parent
+  function drawLayer(ctx, L, preview, mul) {
+    const a = L.opacity * (mul == null ? 1 : mul);
+    if (!L.visible || a <= 0) return;
+    ctx.globalAlpha = clamp(a, 0, 1);
     ctx.globalCompositeOperation = L.blend;
-    const pc = preview ? adjCanvasFor(L) : null;
     const dw = ctx.canvas.width, dh = ctx.canvas.height;
-    if (pc) ctx.drawImage(pc.canvas, 0, 0, dw, dh);
-    else ctx.drawImage(layerSource(L), 0, 0, dw, dh);
+    if (preview && xf && xf.lid === L.id) drawXfLive(ctx, L, dw, dh);
+    else {
+      const pc = preview ? adjCanvasFor(L) : null;
+      if (pc) ctx.drawImage(pc.canvas, 0, 0, dw, dh);
+      else ctx.drawImage(layerSource(L), 0, 0, dw, dh);
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  // Calque de réglage : applique son effet à tout ce qui est déjà composé sous lui (et à son masque)
+  function drawAdjLayer(ctx, L, mul) {
+    const a = L.opacity * (mul == null ? 1 : mul);
+    if (!L.visible || a <= 0 || !L.adj) return;
+    const dw = ctx.canvas.width, dh = ctx.canvas.height;
+    const under = ctx.getImageData(0, 0, dw, dh);
+    const eff = makeCanvas(dw, dh);
+    eff.ctx.putImageData(adjApply(L.adj, under), 0, 0);
+    if (L.mask && L.mask.enabled) {
+      eff.ctx.globalCompositeOperation = 'destination-in';
+      eff.ctx.drawImage(alphaCanvasFor(L.mask, dw, dh), 0, 0);
+      eff.ctx.globalCompositeOperation = 'source-over';
+    }
+    ctx.globalAlpha = clamp(a, 0, 1);
+    ctx.globalCompositeOperation = L.blend;
+    ctx.drawImage(eff.canvas, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function drawEntry(ctx, L, preview, mul) {
+    if (L.type === 'adj') drawAdjLayer(ctx, L, mul);
+    else if (L.type !== 'group') drawLayer(ctx, L, preview, mul);
+  }
+
+  // Empile une liste (du bas vers le haut). Un groupe (précédé de ses enfants) est composé à part
+  // ou, en mode « Transfert » sans effet ni masque, ses enfants sont composés comme s'ils n'étaient pas groupés.
+  function drawStack(ctx, list, preview) {
+    for (let i = 0; i < list.length; i++) {
+      const L = list[i];
+      if (L.type === 'group') { drawGroup(ctx, L, [], preview); continue; }
+      if (L.parent != null) {
+        let j = i;
+        while (j < list.length && !(list[j].type === 'group' && list[j].id === L.parent)) j++;
+        if (j < list.length) { drawGroup(ctx, list[j], list.slice(i, j), preview); i = j; continue; }
+      }
+      drawEntry(ctx, L, preview, 1);
+    }
+  }
+
+  function drawGroup(ctx, G, kids, preview) {
+    if (!G.visible || G.opacity <= 0 || !kids.length) return;
+    const hasAdj = kids.some((k) => k.type === 'adj');
+    const maskOn = !!(G.mask && G.mask.enabled);
+    if (G.blend === 'pass' && !hasAdj && !maskOn) {
+      kids.forEach((k) => drawEntry(ctx, k, preview, G.opacity));
+      return;
+    }
+    const dw = ctx.canvas.width, dh = ctx.canvas.height;
+    const iso = makeCanvas(dw, dh);
+    drawStack(iso.ctx, kids, preview);
+    if (maskOn) {
+      iso.ctx.globalCompositeOperation = 'destination-in';
+      iso.ctx.drawImage(alphaCanvasFor(G.mask, dw, dh), 0, 0);
+      iso.ctx.globalCompositeOperation = 'source-over';
+    }
+    ctx.globalAlpha = clamp(G.opacity, 0, 1);
+    ctx.globalCompositeOperation = G.blend === 'pass' ? 'normal' : G.blend;
+    ctx.drawImage(iso.canvas, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  // Aperçu de la transformation : la partie sélectionnée (ou tout le calque) est dessinée à sa nouvelle place
+  function xfPartCanvas(base, flo, k, dw, dh) {
+    const c = makeCanvas(dw, dh);
+    c.ctx.imageSmoothingQuality = 'medium';
+    if (base) c.ctx.drawImage(base, 0, 0, dw, dh);
+    xfSetTransform(c.ctx, xf, k);
+    c.ctx.drawImage(flo, 0, 0);
+    c.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    return c.canvas;
+  }
+  function drawXfLive(ctx, L, dw, dh) {
+    const k = dw / doc.w;
+    const pix = xfPartCanvas(xf.pixB, xf.pixF, k, dw, dh);
+    if (xf.maskF && xf.maskEnabled) {
+      const m = xfPartCanvas(xf.maskB, xf.maskF, k, dw, dh);
+      const pc = pix.getContext('2d');
+      pc.globalCompositeOperation = 'destination-in';
+      pc.drawImage(alphaFromGray(m), 0, 0);
+      pc.globalCompositeOperation = 'source-over';
+    }
+    ctx.drawImage(pix, 0, 0);
+  }
+
+  // Effet d'un calque de réglage sur une image (ImageData) ; les courbes passent par leurs tables
+  function adjApply(a, img) {
+    return runAdj(a.kind, a.kind === 'curves' ? { luts: buildLuts(a.curve) } : a.params, img);
   }
 
   function composeTo(ctx, w, h, bg, preview) {
@@ -751,7 +924,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     ctx.globalCompositeOperation = 'source-over';
     ctx.clearRect(0, 0, w, h);
     if (bg) { ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h); }
-    for (const L of layers) drawLayer(ctx, L, preview);
+    drawStack(ctx, layers, preview);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
   }
@@ -861,6 +1034,19 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       if (lasso.hover) P.lineTo(lasso.hover.x, lasso.hover.y);
       antsPath(P, lw);
     }
+    if (xf) drawXfFrame(lw);
+    if (tool === 'clone' && cloneSrc) {
+      const s = 14 / zoom;
+      octx.save();
+      octx.strokeStyle = '#22d3ee';
+      octx.lineWidth = lw;
+      octx.beginPath();
+      octx.arc(cloneSrc.x, cloneSrc.y, s * 0.6, 0, Math.PI * 2);
+      octx.moveTo(cloneSrc.x - s, cloneSrc.y); octx.lineTo(cloneSrc.x + s, cloneSrc.y);
+      octx.moveTo(cloneSrc.x, cloneSrc.y - s); octx.lineTo(cloneSrc.x, cloneSrc.y + s);
+      octx.stroke();
+      octx.restore();
+    }
     antsSync();
   }
 
@@ -882,6 +1068,23 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       E.opacityVal.textContent = pct + '%';
     }
     E.cropBtn.disabled = !cropRect;
+    // L'option « Transfert » n'existe que pour les groupes
+    const isG = !!(L && L.type === 'group');
+    let passOpt = E.blend.querySelector('option[value="pass"]');
+    if (isG && !passOpt) {
+      passOpt = document.createElement('option');
+      passOpt.value = 'pass'; passOpt.textContent = 'Transfert';
+      E.blend.insertBefore(passOpt, E.blend.firstChild);
+    } else if (!isG && passOpt) passOpt.remove();
+    if (L) E.blend.value = L.blend;
+    root.querySelectorAll('[data-lact=multi]').forEach((b) => b.classList.toggle('ie-on', multiMode));
+    const setVal = (sel, v) => {
+      const el = root.querySelector(sel);
+      if (el && document.activeElement !== el) el.value = v;
+    };
+    setVal('[data-imw]', doc.w); setVal('[data-imh]', doc.h);
+    setVal('[data-cw]', doc.w); setVal('[data-ch]', doc.h);
+    root.querySelectorAll('[data-lact=transform]').forEach((b) => b.classList.toggle('ie-on', !!xf));
     const hasMask = !!(L && L.mask);
     E.mToggle.disabled = !hasMask;
     E.mToggle.classList.toggle('ie-on', hasMask && L.mask.enabled);
@@ -922,18 +1125,52 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     E.lyrList.innerHTML = '';
     for (let i = layers.length - 1; i >= 0; i--) {
       const L = layers[i];
+      const g = groupOf(L);
+      if (g && !g.open) continue;                       // groupe replié
       const isAct = L.id === activeId;
       const row = document.createElement('div');
-      row.className = 'ie-lyr' + (isAct ? ' ie-on' : '');
+      row.className = 'ie-lyr' + (isAct ? ' ie-on' : '') + (multi.has(L.id) ? ' ie-multi' : '') +
+        (g ? ' ie-kid' : '') + (L.type === 'group' ? ' ie-grp' : '') + (L.type === 'adj' ? ' ie-adjrow' : '');
       row.dataset.id = L.id;
+
+      const grip = document.createElement('button');
+      grip.className = 'ie-grip';
+      grip.dataset.grip = '1';
+      grip.title = 'Glisser pour déplacer';
+      grip.setAttribute('aria-label', 'Glisser pour déplacer');
+      grip.innerHTML = icon('grip');
+      row.append(grip);
+
+      if (L.type === 'group') {
+        const fold = document.createElement('button');
+        fold.className = 'ie-fold';
+        fold.dataset.fold = L.id;
+        fold.title = L.open ? 'Replier le groupe' : 'Déplier le groupe';
+        fold.setAttribute('aria-label', fold.title);
+        fold.innerHTML = icon(L.open ? 'chevDown' : 'chevRight');
+        row.append(fold);
+      }
 
       const eye = document.createElement('button');
       eye.className = 'ie-eye';
       eye.title = L.visible ? 'Masquer le calque' : 'Afficher le calque';
       eye.innerHTML = icon(L.visible ? 'eye' : 'eyeOff');
+      row.append(eye);
 
-      const th = thumb(L.canvas, 'ie-thumb' + (isAct && editTarget === 'pixels' ? ' ie-tgt' : ''), false);
-      row.append(eye, th);
+      if (L.type === 'pixel') {
+        row.append(thumb(L.canvas, 'ie-thumb' + (isAct && editTarget === 'pixels' ? ' ie-tgt' : ''), false));
+      } else if (L.type === 'adj') {
+        const ai = document.createElement('span');
+        ai.className = 'ie-adjico';
+        ai.title = 'Calque de réglage : ' + ADJ[L.adj.kind].label;
+        ai.innerHTML = icon(ADJ_ICON[L.adj.kind] || 'sliders');
+        row.append(ai);
+      } else {
+        const gi = document.createElement('span');
+        gi.className = 'ie-adjico ie-groupico';
+        gi.innerHTML = icon('folder');
+        row.append(gi);
+      }
 
       if (L.mask) {
         const mt = thumb(L.mask.canvas, 'ie-thumb ie-mthumb' + (isAct && editTarget === 'mask' ? ' ie-tgt' : ''), !L.mask.enabled);
@@ -1002,6 +1239,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       w: doc.w, h: doc.h, activeId,
       layers: layers.map((L) => ({
         id: L.id, name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend,
+        type: L.type, parent: L.parent, open: L.open, adj: L.adj,
         data: snapData(L),
         mask: L.mask ? { enabled: L.mask.enabled, data: snapData(L.mask) } : null,
       })),
@@ -1014,6 +1252,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     layers = st.layers.map((s) => {
       const L = makeLayer(s.name, doc.w, doc.h);
       L.id = s.id; L.visible = s.visible; L.opacity = s.opacity; L.blend = s.blend;
+      L.type = s.type; L.parent = s.parent; L.open = s.open; L.adj = s.adj;
       L.ctx.putImageData(s.data, 0, 0);
       L._snap = { rev: L.rev, data: s.data };
       if (s.mask) {
@@ -1115,6 +1354,8 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
 
   function goto(j) {
     if (j < 0 || j >= history.length || j === histIdx) return;
+    cancelXf();
+    if (layerEd) layerEd.onCancel();
     cancelAdj();
     while (histIdx > j) { applyOp(history[histIdx].undo); histIdx--; }
     while (histIdx < j) { histIdx++; applyOp(history[histIdx].redo); }
@@ -1127,8 +1368,10 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
 
   function resetDocument(w, h, list) {
     cancelAdj();
+    xf = null; layerEd = null; multi = new Set();
     doc.w = w; doc.h = h;
     layers = list;
+    normalizeLayers();
     activeId = list[list.length - 1].id;
     editTarget = 'pixels'; maskView = null;
     selection = null; cropRect = null; preview = null; lasso = null;
@@ -1146,10 +1389,13 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
   }
 
   // ---------- Calques ----------
+  // Insère L juste au-dessus du calque actif ; au-dessus d'un enfant, L rejoint son groupe
   function insertAbove(L) {
     const a = active();
     const idx = a ? layers.indexOf(a) : layers.length - 1;
+    L.parent = a && a.type !== 'group' && a.parent != null ? a.parent : null;
     layers.splice(idx + 1, 0, L);
+    normalizeLayers();
   }
 
   function addLayerFromImageData(imageData, name) {
@@ -1172,9 +1418,16 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
   }
 
   function selectLayerRow(id) {
+    closeEditors();
     cancelAdj();
     activeId = id;
     editTarget = 'pixels';
+    renderAll();
+  }
+
+  function toggleMulti(id) {
+    if (!multi.size && activeId !== id) multi.add(activeId);
+    if (multi.has(id)) multi.delete(id); else multi.add(id);
     renderAll();
   }
 
@@ -1227,10 +1480,196 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     inp.addEventListener('blur', () => finish(true));
   }
 
+  // Réglages de calque : types proposés et copies immuables (chaque modification remplace l'objet)
+  const LAYER_ADJ = ['bc', 'hsl', 'levels', 'curves', 'bw', 'invert', 'threshold'];
+  const defaultParams = (kind) => {
+    const p = {};
+    ADJ[kind].params.forEach((q) => { p[q.k] = q.v; });
+    return p;
+  };
+  const identityCurves = () => ({ rgb: [[0, 0], [255, 255]], r: [[0, 0], [255, 255]], g: [[0, 0], [255, 255]], b: [[0, 0], [255, 255]] });
+  const cloneCurves = (c) => (c ? {
+    rgb: c.rgb.map((p) => p.slice()), r: c.r.map((p) => p.slice()),
+    g: c.g.map((p) => p.slice()), b: c.b.map((p) => p.slice()),
+  } : null);
+
+  function addAdjLayer(kind) {
+    if (!ADJ[kind] || !LAYER_ADJ.includes(kind)) return;
+    closeEditors();
+    const before = captureState();
+    const L = makeLayer(ADJ[kind].label, doc.w, doc.h);
+    L.type = 'adj';
+    L.adj = { kind, params: defaultParams(kind), curve: kind === 'curves' ? identityCurves() : null };
+    L.mask = makeMask(L.id, doc.w, doc.h, 255);
+    insertAbove(L);
+    activeId = L.id;
+    editTarget = 'pixels';
+    pushState('Nouveau calque de réglage', before);
+    if (ADJ[kind].params.length || ADJ[kind].curve) openAdjLayerEditor(L);
+  }
+
+  // Ouvre les réglages d'un calque de réglage : les modifications sont visibles tout de suite
+  function openAdjLayerEditor(L) {
+    if (!L || L.type !== 'adj' || !L.adj) return;
+    const def = ADJ[L.adj.kind];
+    if (!def.params.length && !def.curve) { setStatus('Ce calque n’a pas de réglage à modifier.'); return; }
+    closeEditors();
+    cancelAdj();
+    activeId = L.id;
+    editTarget = 'pixels';
+    const A = {
+      lid: L.id, kind: L.adj.kind, before: L.adj, ch: 'rgb',
+      params: { ...L.adj.params }, curve: L.adj.curve ? cloneCurves(L.adj.curve) : null,
+    };
+    A.alive = () => layerEd === A;
+    A.onChange = () => {
+      const cur = layers.find((l) => l.id === A.lid);
+      if (!cur) return;
+      cur.adj = { kind: A.kind, params: { ...A.params }, curve: A.curve ? cloneCurves(A.curve) : null };
+      requestCompose();
+    };
+    A.onApply = () => commitLayerEdit();
+    A.onCancel = () => {
+      if (layerEd !== A) return;
+      layerEd = null;
+      const cur = layers.find((l) => l.id === A.lid);
+      if (cur) cur.adj = A.before;
+      hideAdjBox();
+      renderAll();
+    };
+    layerEd = A;
+    if (def.curve) showCurvesEditor(A); else showAdjControls(def, A);
+    renderAll();
+  }
+
+  // Valide les réglages d'un calque de réglage ouvert (une seule entrée d'historique)
+  function commitLayerEdit() {
+    const A = layerEd;
+    if (!A) return;
+    layerEd = null;
+    hideAdjBox();
+    const cur = layers.find((l) => l.id === A.lid);
+    if (!cur) { renderAll(); return; }
+    const same = JSON.stringify([A.before.params, A.before.curve]) === JSON.stringify([cur.adj.params, cur.adj.curve]);
+    if (same) { cur.adj = A.before; renderAll(); return; }
+    pushEntry('Réglage du calque', { kind: 'props', lid: cur.id, set: { adj: A.before } },
+      { kind: 'props', lid: cur.id, set: { adj: cur.adj } });
+  }
+
+  // Termine les éditions en cours (transformation, réglage de calque) avant une autre action
+  function closeEditors() {
+    applyXf();
+    commitLayerEdit();
+  }
+
+  // Monte / descend un calque (ou un groupe entier) ; un enfant reste dans son groupe
+  function moveLayer(L, up) {
+    const items = topItems();
+    const g = groupOf(L);
+    if (g) {
+      const it = items.find((x) => x.head === g);
+      const j = it.kids.indexOf(L), nj = up ? j - 1 : j + 1;
+      if (nj < 0 || nj >= it.kids.length) { setStatus('Utilisez le glisser-déposer pour sortir du groupe.'); return; }
+      [it.kids[j], it.kids[nj]] = [it.kids[nj], it.kids[j]];
+    } else {
+      const i = items.findIndex((x) => x.head === L), ni = up ? i - 1 : i + 1;
+      if (ni < 0 || ni >= items.length) return;
+      [items[i], items[ni]] = [items[ni], items[i]];
+    }
+    const before = captureState();
+    layers = itemsToLayers(items);
+    pushState(up ? 'Monter le calque' : 'Descendre le calque', before);
+  }
+
+  // Glisser-déposer : la ligne (ou le groupe entier) passe avant ou après la ligne cible
+  function dropLayer(id, tid, after) {
+    const L = layers.find((l) => l.id === id), T = layers.find((l) => l.id === tid);
+    if (!L || !T || L === T) return;
+    const rows = layers.slice().reverse();
+    const block = L.type === 'group' ? rows.filter((r) => r === L || r.parent === L.id) : [L];
+    if (block.includes(T)) return;
+    const rest = rows.filter((r) => !block.includes(r));
+    const idx = rest.indexOf(T) + (after ? 1 : 0);
+    // Rejoint le groupe de la ligne cible (un groupe reste au premier niveau)
+    const parent = L.type === 'group' ? null
+      : after && T.type === 'group' ? T.id
+        : (T.parent != null ? T.parent : null);
+    const before = captureState();
+    L.parent = parent;
+    rest.splice(idx, 0, ...block);
+    layers = rest.reverse();
+    normalizeLayers();
+    pushState('Déplacer le calque', before);
+  }
+
+  // Ctrl+G : regroupe la sélection (ou le calque actif) dans un nouveau groupe
+  function groupSelected() {
+    closeEditors();
+    const sel = layers.filter((l) => l.type !== 'group' && (multi.has(l.id) || l.id === activeId));
+    if (!sel.length) { setStatus('Aucun calque à grouper.'); return; }
+    const before = captureState();
+    const top = Math.max(...sel.map((l) => layers.indexOf(l)));
+    const rest = layers.filter((l) => !sel.includes(l));
+    const k = rest.filter((l) => layers.indexOf(l) < top).length;
+    const G = makeLayer(`Groupe ${++layerCount}`, doc.w, doc.h);
+    G.type = 'group';
+    G.blend = 'pass';
+    sel.forEach((l) => { l.parent = G.id; });
+    layers = [...rest.slice(0, k), ...sel, G, ...rest.slice(k)];
+    normalizeLayers();
+    activeId = G.id;
+    editTarget = 'pixels';
+    multi.clear();
+    pushState('Nouveau groupe', before);
+  }
+
+  // Ctrl+Maj+G : dissocie le groupe actif (ses calques restent en place)
+  function ungroupActive() {
+    closeEditors();
+    const G = active();
+    if (!G || G.type !== 'group') { setStatus('Sélectionnez un groupe.'); return; }
+    const before = captureState();
+    layers.forEach((l) => { if (l.parent === G.id) l.parent = null; });
+    layers = layers.filter((l) => l !== G);
+    normalizeLayers();
+    activeId = layers[layers.length - 1].id;
+    multi.clear();
+    pushState('Dissocier le groupe', before);
+  }
+
+  function deleteGroup(G) {
+    const kids = layers.filter((l) => l.parent === G.id);
+    if (layers.length - kids.length - 1 < 1) { setStatus('Impossible de supprimer le dernier calque.'); return; }
+    const before = captureState();
+    layers = layers.filter((l) => l !== G && l.parent !== G.id);
+    activeId = layers[layers.length - 1].id;
+    editTarget = 'pixels';
+    multi.clear();
+    if (maskView !== null && !layers.some((l) => l.id === maskView)) maskView = null;
+    pushState('Supprimer le groupe', before);
+  }
+
   function layerAction(a) {
+    if (a === 'group') return groupSelected();
+    if (a === 'ungroup') return ungroupActive();
+    if (a === 'multi') { multiMode = !multiMode; renderAll(); return; }
+    if (a === 'transform') return setTool('transform');
+    if (a === 'adjnew') return addAdjLayer(root.querySelector('[data-adjkind]').value);
+    if (a === 'adjedit') {
+      const A = active();
+      if (A && A.type === 'adj') openAdjLayerEditor(A);
+      else setStatus('Sélectionnez un calque de réglage.');
+      return;
+    }
     const L = active();
     if (!L) return;
+    if (L.type === 'group') {
+      if (a === 'del') return deleteGroup(L);
+      if (a === 'dup') { setStatus('Dupliquez les calques du groupe un par un.'); return; }
+    }
+    if (a === 'maskapply' && L.type !== 'pixel') { setStatus('Appliquer le masque : calques de pixels seulement.'); return; }
     const i = layers.indexOf(L);
+    closeEditors();
     cancelAdj();
     const W = doc.w, H = doc.h;
     if (a === 'new') {
@@ -1243,6 +1682,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     if (a === 'dup') {
       const before = captureState();
       const N = makeLayer(L.name + ' copie', W, H);
+      N.type = L.type; N.adj = L.adj;
       N.ctx.drawImage(L.canvas, 0, 0);
       touch(N);
       N.visible = L.visible; N.opacity = L.opacity; N.blend = L.blend;
@@ -1266,19 +1706,29 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       pushState('Supprimer le calque', before);
       return;
     }
-    if (a === 'up' || a === 'down') {
-      const j = a === 'up' ? i + 1 : i - 1;
-      if (j < 0 || j >= layers.length) return;
-      const before = captureState();
-      [layers[i], layers[j]] = [layers[j], layers[i]];
-      pushState(a === 'up' ? 'Monter le calque' : 'Descendre le calque', before);
-      return;
-    }
+    if (a === 'up' || a === 'down') return moveLayer(L, a === 'up');
     if (a === 'merge') {
       if (i < 1) { setStatus('Aucun calque sous celui-ci.'); return; }
-      const before = captureState();
       const B = layers[i - 1];
-      if (L.visible) {
+      if (L.type === 'group' || B.type === 'group') { setStatus('Fusion impossible avec un groupe : dissociez-le d’abord.'); return; }
+      if (L.parent !== B.parent) { setStatus('Fusion impossible : les deux calques ne sont pas dans le même groupe.'); return; }
+      if (B.type !== 'pixel') { setStatus('Fusion impossible : le calque du dessous n’a pas de pixels.'); return; }
+      const before = captureState();
+      if (L.type === 'adj') {
+        // Un réglage fusionné s'applique aux pixels du calque du dessous (masque et opacité pris en compte)
+        if (L.visible && L.opacity > 0) {
+          const img = B.ctx.getImageData(0, 0, W, H);
+          const eff = adjApply(L.adj, img).data, src = img.data;
+          const m = L.mask && L.mask.enabled ? alphaCanvasFor(L.mask, W, H).getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data : null;
+          for (let p = 0; p < W * H; p++) {
+            const f = L.opacity * (m ? m[p * 4 + 3] / 255 : 1);
+            if (f <= 0) continue;
+            for (let c = 0; c < 3; c++) src[p * 4 + c] = src[p * 4 + c] + (eff[p * 4 + c] - src[p * 4 + c]) * f;
+          }
+          B.ctx.putImageData(img, 0, 0);
+          touch(B);
+        }
+      } else if (L.visible) {
         B.ctx.save();
         B.ctx.globalAlpha = L.opacity;
         B.ctx.globalCompositeOperation = L.blend;
@@ -1353,9 +1803,11 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
 
   // ---------- Outils : pinceau, remplissage, couleurs, texte ----------
   function setTool(id) {
+    if (xf && id !== 'transform') applyXf();
     cancelAdj();
     if (lasso && id !== 'lasso') lasso = null;
     tool = id;
+    if (id === 'transform' && !xf) startXf();
     updateOptions();
     drawOverlay();
   }
@@ -1432,6 +1884,133 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     return R;
   }
 
+  // Tampon et correcteur : même principe de trait (tuiles capturées, un patch par trait)
+  const DIRS8 = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
+  // Points espacés le long d'un segment (même espacement que le pinceau)
+  function forDabs(a, b, fn) {
+    const step = Math.max(1, opts.size * 0.12);
+    const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / step));
+    for (let i = 1; i <= n; i++) {
+      const t = i / n;
+      fn({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+    }
+  }
+  // Applique draw() sur R, puis ne garde le résultat que dans la sélection (si elle existe)
+  function guardSel(S, R, draw) {
+    if (!selection) { draw(); return; }
+    const before = S.ctx.getImageData(R.x, R.y, R.w, R.h);
+    draw();
+    const after = S.ctx.getImageData(R.x, R.y, R.w, R.h);
+    mixSel(before, after, R);
+    S.ctx.putImageData(after, R.x, R.y);
+  }
+
+  // Tampon : copie la source (décalée) à travers un disque doux
+  function cloneDab(d, p) {
+    const S = d.S, r = Math.max(0.5, opts.size / 2), D = Math.ceil(r * 2) + 2;
+    const x0 = Math.round(p.x - D / 2), y0 = Math.round(p.y - D / 2);
+    const R = clipRect(x0, y0, x0 + D, y0 + D);
+    if (!R) return null;
+    captureTiles(S, R, d.tiles);
+    const t = makeCanvas(D, D);
+    t.ctx.drawImage(d.sample, x0 + d.off.x, y0 + d.off.y, D, D, 0, 0, D, D);
+    t.ctx.globalCompositeOperation = 'destination-in';
+    const h = clamp(opts.hardness / 100, 0, 0.99);
+    const g = t.ctx.createRadialGradient(D / 2, D / 2, 0, D / 2, D / 2, r);
+    g.addColorStop(0, '#000');
+    g.addColorStop(h, '#000');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    t.ctx.fillStyle = g;
+    t.ctx.fillRect(0, 0, D, D);
+    guardSel(S, R, () => {
+      S.ctx.save();
+      S.ctx.globalAlpha = opts.opacity / 100;
+      S.ctx.globalCompositeOperation = 'source-over';
+      S.ctx.drawImage(t.canvas, x0, y0);
+      S.ctx.restore();
+    });
+    touch(S);
+    return R;
+  }
+
+  // Correcteur : choisit, parmi 8 voisins, la texture qui raccorde le mieux le pourtour,
+  // la recale sur la luminosité moyenne du pourtour, puis la fond progressivement dans le défaut
+  function healDab(d, p) {
+    const S = d.S, r = Math.max(1, opts.size / 2), pad = Math.max(3, Math.round(r * 0.5));
+    const R = clipRect(p.x - r - pad, p.y - r - pad, p.x + r + pad, p.y + r + pad);
+    if (!R) return null;
+    captureTiles(S, R, d.tiles);
+    const W = R.w, H = R.h, off = Math.round(2 * (r + pad)) + 2;
+    const T = S.ctx.getImageData(R.x, R.y, W, H), td = T.data;
+    const wgt = new Float32Array(W * H), ring = new Uint8Array(W * H);
+    const op = opts.opacity / 100;
+    let nRing = 0;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const q = y * W + x;
+        const dd = Math.hypot(R.x + x + 0.5 - p.x, R.y + y + 0.5 - p.y);
+        let w = 0;
+        if (dd <= r) w = 1;
+        else if (dd < r + pad) { const t = (dd - r) / pad; w = 1 - t * t * (3 - 2 * t); }
+        if (dd >= r && dd < r + pad) { ring[q] = 1; nRing++; }
+        const sv = selection ? selection.mask[(R.y + y) * doc.w + R.x + x] / 255 : 1;
+        wgt[q] = w * op * sv;
+      }
+    }
+    if (!nRing) return null;
+    let best = null, bestCost = Infinity;
+    for (const [dx, dy] of DIRS8) {
+      const cx = R.x + dx * off, cy = R.y + dy * off;
+      if (cx < 0 || cy < 0 || cx + W > doc.w || cy + H > doc.h) continue;
+      const C = S.ctx.getImageData(cx, cy, W, H), cd = C.data;
+      let cost = 0;
+      for (let q = 0; q < W * H; q++) {
+        if (!ring[q]) continue;
+        const i = q * 4;
+        const e0 = td[i] - cd[i], e1 = td[i + 1] - cd[i + 1], e2 = td[i + 2] - cd[i + 2];
+        cost += e0 * e0 + e1 * e1 + e2 * e2;
+      }
+      if (cost < bestCost) { bestCost = cost; best = C; }
+    }
+    if (!best) return null;
+    const cd = best.data;
+    const mT = [0, 0, 0], mC = [0, 0, 0];
+    for (let q = 0; q < W * H; q++) {
+      if (!ring[q]) continue;
+      const i = q * 4;
+      for (let c = 0; c < 3; c++) { mT[c] += td[i + c]; mC[c] += cd[i + c]; }
+    }
+    const delta = [0, 1, 2].map((c) => (mT[c] - mC[c]) / nRing);
+    for (let q = 0; q < W * H; q++) {
+      const w = wgt[q];
+      if (w <= 0) continue;
+      const i = q * 4;
+      for (let c = 0; c < 3; c++) td[i + c] = td[i + c] * (1 - w) + clamp(cd[i + c] + delta[c], 0, 255) * w;
+      td[i + 3] = td[i + 3] * (1 - w) + cd[i + 3] * w;
+    }
+    S.ctx.putImageData(T, R.x, R.y);
+    touch(S);
+    return R;
+  }
+
+  // Trait du tampon ou du correcteur (mode = 'clone' | 'heal'), sinon pinceau / gomme
+  function paintSegment(d, a, b) {
+    if (!d.mode) return brushSegment(d.S, a, b, d.erase, d.rgb, d.tiles);
+    let R = null;
+    forDabs(a, b, (p) => {
+      const r = d.mode === 'clone' ? cloneDab(d, p) : healDab(d, p);
+      if (r) R = unionRect(R, r);
+    });
+    return R;
+  }
+
+  // Copie de l'échantillon pour le tampon « Tous les calques » (fixée au début du trait)
+  function composedSnapshot() {
+    const c = makeCanvas(doc.w, doc.h);
+    composeTo(c.ctx, doc.w, doc.h, null, false);
+    return c.canvas;
+  }
+
   // Fin de trait : un seul patch = boîte des pixels réellement modifiés
   function finishStroke(d) {
     const dr = d.dirty;
@@ -1443,7 +2022,8 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     d.tiles.forEach((t) => tileInto(before, dr, t));
     const r = diffBBox(before, after);
     if (!r) return;
-    pushPatch(d.erase ? 'Gomme' : 'Pinceau', S,
+    const label = d.mode === 'clone' ? 'Tampon' : d.mode === 'heal' ? 'Correcteur' : d.erase ? 'Gomme' : 'Pinceau';
+    pushPatch(label, S,
       { x: dr.x + r.x, y: dr.y + r.y, w: r.w, h: r.h },
       cropImage(before, r.x, r.y, r.w, r.h), cropImage(after, r.x, r.y, r.w, r.h));
   }
@@ -1613,9 +2193,295 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     renderAll();
   }
 
+  // ---------- Transformation libre (Ctrl+T) ----------
+  // Session xf : le contenu (partie sélectionnée ou calque entier, et son masque) est gardé à part ;
+  // l'aperçu est dessiné en direct, les pixels ne changent qu'à la validation (un seul pas d'historique).
+  const HANDLES = [[-1, -1], [0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0]];
+  // Matrice source -> document : p -> C + R(angle) · diag(a, b) · (p - O)
+  function xfMatrix(x) {
+    const c = Math.cos(x.angle), s = Math.sin(x.angle);
+    return {
+      m11: c * x.a, m12: s * x.a, m21: -s * x.b, m22: c * x.b,
+      dx: x.cx - c * x.a * x.ox + s * x.b * x.oy,
+      dy: x.cy - s * x.a * x.ox - c * x.b * x.oy,
+    };
+  }
+  function xfSetTransform(ctx, x, k) {
+    const M = xfMatrix(x);
+    ctx.setTransform(M.m11 * k, M.m12 * k, M.m21 * k, M.m22 * k, M.dx * k, M.dy * k);
+  }
+  // Point local (relatif au centre O) -> document
+  function xfMap(x, ux, uy) {
+    const c = Math.cos(x.angle), s = Math.sin(x.angle), px = x.a * ux, py = x.b * uy;
+    return { x: x.cx + c * px - s * py, y: x.cy + s * px + c * py };
+  }
+  // Document -> local (relatif au centre O)
+  function xfInv(x, p) {
+    const c = Math.cos(x.angle), s = Math.sin(x.angle), dx = p.x - x.cx, dy = p.y - x.cy;
+    return { x: (c * dx + s * dy) / x.a, y: (-s * dx + c * dy) / x.b };
+  }
+  function xfHandles() {
+    const x = xf, list = [];
+    HANDLES.forEach(([hx, hy]) => list.push({ hx, hy, p: xfMap(x, hx * x.w / 2, hy * x.h / 2) }));
+    const top = xfMap(x, 0, -x.h / 2);
+    const dx = top.x - x.cx, dy = top.y - x.cy, len = Math.hypot(dx, dy) || 1;
+    const off = 26 / zoom;
+    list.push({ rot: true, p: { x: top.x + dx / len * off, y: top.y + dy / len * off } });
+    return list;
+  }
+  function canvasOf(img, W, H) {
+    const c = makeCanvas(W, H);
+    c.ctx.putImageData(img, 0, 0);
+    return c.canvas;
+  }
+
+  function startXf() {
+    const L = active();
+    if (!L || L.type !== 'pixel') { setStatus('La transformation s’applique à un calque de pixels.'); return false; }
+    cancelAdj();
+    closeEditors();
+    const W = doc.w, H = doc.h;
+    const sel = selection ? selection.mask : null;
+    const bb = selection ? { ...selection.bbox } : { x: 0, y: 0, w: W, h: H };
+    const pix = L.ctx.getImageData(0, 0, W, H);
+    const pF = cloneImage(pix), pB = cloneImage(pix);
+    if (sel) { scaleSel(pF, 0, 0, false, false); scaleSel(pB, 0, 0, true, false); }
+    const cx = bb.x + bb.w / 2, cy = bb.y + bb.h / 2;
+    xf = {
+      lid: L.id, w: bb.w, h: bb.h, ox: cx, oy: cy, cx, cy, a: 1, b: 1, angle: 0,
+      drag: null, pinch: null,
+      pixF: canvasOf(pF, W, H), pixB: sel ? canvasOf(pB, W, H) : null,
+      maskF: null, maskB: null, maskEnabled: !!(L.mask && L.mask.enabled), selC: null,
+    };
+    if (L.mask) {
+      const mi = L.mask.ctx.getImageData(0, 0, W, H);
+      const mF = cloneImage(mi), mB = cloneImage(mi);
+      if (sel) { scaleSel(mF, 0, 0, false, true); scaleSel(mB, 0, 0, true, true); }
+      xf.maskF = canvasOf(mF, W, H);
+      xf.maskB = sel ? canvasOf(mB, W, H) : null;
+    }
+    if (sel) {
+      const si = new ImageData(W, H);
+      for (let p = 0; p < W * H; p++) {
+        const i = p * 4, v = sel[p];
+        si.data[i] = si.data[i + 1] = si.data[i + 2] = v;
+        si.data[i + 3] = 255;
+      }
+      xf.selC = canvasOf(si, W, H);
+    }
+    tool = 'transform';
+    syncXfFields();
+    updateOptions();
+    requestCompose();
+    drawOverlay();
+    updateUI();
+    setStatus('Glissez le cadre, Entrée valide, Échap annule.');
+    return true;
+  }
+
+  // Rendu pleine résolution d'une partie transformée (base non transformée + partie déplacée)
+  function xfRenderFull(x, base, flo) {
+    const c = makeCanvas(doc.w, doc.h);
+    c.ctx.imageSmoothingQuality = 'high';
+    if (base) c.ctx.drawImage(base, 0, 0);
+    xfSetTransform(c.ctx, x, 1);
+    c.ctx.drawImage(flo, 0, 0);
+    c.ctx.setTransform(1, 0, 0, 1, 0, 0);
+    return c.canvas;
+  }
+
+  // Valide : pixels, masque et sélection suivent la transformation ; une seule entrée d'historique
+  function applyXf() {
+    if (!xf) return;
+    const x = xf;
+    xf = null;
+    const L = layers.find((l) => l.id === x.lid);
+    if (!L) { renderAll(); return; }
+    const before = captureState();
+    const W = doc.w, H = doc.h;
+    const pix = xfRenderFull(x, x.pixB, x.pixF);
+    L.ctx.save();
+    L.ctx.globalCompositeOperation = 'copy';
+    L.ctx.drawImage(pix, 0, 0);
+    L.ctx.restore();
+    touch(L);
+    if (L.mask && x.maskF) {
+      const mk = xfRenderFull(x, x.maskB, x.maskF);
+      L.mask.ctx.save();
+      L.mask.ctx.globalCompositeOperation = 'copy';
+      L.mask.ctx.drawImage(mk, 0, 0);
+      L.mask.ctx.restore();
+      L.mask.alpha = null;
+      touch(L.mask);
+    }
+    if (x.selC) {
+      const sd = xfRenderFull(x, null, x.selC).getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+      const m = new Uint8ClampedArray(W * H);
+      for (let p = 0; p < m.length; p++) m[p] = sd[p * 4];
+      selection = makeSel(m);
+    }
+    pushState('Transformation', before);
+  }
+
+  function cancelXf() {
+    if (!xf) return;
+    xf = null;
+    renderAll();
+  }
+
+  function drawXfFrame(lw) {
+    const x = xf;
+    const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([u, v]) => xfMap(x, u * x.w / 2, v * x.h / 2));
+    const top = xfMap(x, 0, -x.h / 2);
+    octx.save();
+    octx.lineWidth = lw;
+    octx.strokeStyle = '#22d3ee';
+    octx.beginPath();
+    corners.forEach((p, i) => { if (i) octx.lineTo(p.x, p.y); else octx.moveTo(p.x, p.y); });
+    octx.closePath();
+    octx.stroke();
+    const hs = 4.5 / zoom;
+    xfHandles().forEach((h) => {
+      if (h.rot) {
+        octx.beginPath();
+        octx.moveTo(top.x, top.y); octx.lineTo(h.p.x, h.p.y);
+        octx.stroke();
+        octx.beginPath();
+        octx.arc(h.p.x, h.p.y, 6 / zoom, 0, Math.PI * 2);
+        octx.fillStyle = '#22d3ee';
+        octx.fill();
+        octx.stroke();
+      } else {
+        octx.beginPath();
+        octx.rect(h.p.x - hs, h.p.y - hs, 2 * hs, 2 * hs);
+        octx.fillStyle = '#fff';
+        octx.fill();
+        octx.stroke();
+      }
+    });
+    octx.restore();
+  }
+
+  // Pointeur appuyé dans la session : poignée, rotation, déplacement (rien hors du cadre)
+  function xfDown(e, pt) {
+    const x = xf;
+    const r = (e.pointerType === 'touch' ? 22 : 12) / zoom;
+    const hit = xfHandles().find((h) => dist(pt, h.p) <= r);
+    if (hit) {
+      if (hit.rot) x.drag = { kind: 'rot', ang0: x.angle, start: Math.atan2(pt.y - x.cy, pt.x - x.cx) };
+      else x.drag = { kind: 'h', hx: hit.hx, hy: hit.hy, a0: x.a, b0: x.b, A: xfMap(x, -hit.hx * x.w / 2, -hit.hy * x.h / 2) };
+      return;
+    }
+    const li = xfInv(x, pt);
+    if (Math.abs(li.x) <= x.w / 2 && Math.abs(li.y) <= x.h / 2) {
+      x.drag = { kind: 'move', px: pt.x, py: pt.y, cx0: x.cx, cy0: x.cy };
+    }
+  }
+
+  function xfMove(e, pt) {
+    const x = xf, d = x.drag;
+    if (!d) return;
+    if (d.kind === 'move') {
+      x.cx = d.cx0 + pt.x - d.px;
+      x.cy = d.cy0 + pt.y - d.py;
+    } else if (d.kind === 'rot') {
+      let ang = d.ang0 + Math.atan2(pt.y - x.cy, pt.x - x.cx) - d.start;
+      if (e.shiftKey) { const st = Math.PI / 12; ang = Math.round(ang / st) * st; }
+      x.angle = ang;
+    } else {
+      // Ancre fixe (coin ou bord opposé) ; proportionnel aux coins par défaut, libre avec Maj
+      const c = Math.cos(x.angle), s = Math.sin(x.angle);
+      const vx0 = pt.x - d.A.x, vy0 = pt.y - d.A.y;
+      const vx = c * vx0 + s * vy0, vy = -s * vx0 + c * vy0;
+      const dUx = d.hx * x.w, dUy = d.hy * x.h;
+      const minAbs = (q) => (Math.abs(q) < 0.01 ? (q < 0 ? -0.01 : 0.01) : q);
+      const prop = d.hx !== 0 && d.hy !== 0 && !e.shiftKey;
+      let na = d.a0, nb = d.b0;
+      if (prop) {
+        na = nb = minAbs((vx * dUx + vy * dUy) / (dUx * dUx + dUy * dUy));
+      } else {
+        if (d.hx) na = minAbs(vx / dUx);
+        if (d.hy) nb = minAbs(vy / dUy);
+      }
+      x.a = na; x.b = nb;
+      const qx = na * (-d.hx * x.w / 2), qy = nb * (-d.hy * x.h / 2);
+      x.cx = d.A.x - (c * qx - s * qy);
+      x.cy = d.A.y - (s * qx + c * qy);
+    }
+    requestCompose();
+    drawOverlay();
+    syncXfFields();
+  }
+
+  // Champs X, Y, L, H, angle de la barre d'options (reflètent la session)
+  function syncXfFields() {
+    if (!xf || !root) return;
+    const set = (k, v) => {
+      const el = root.querySelector(`[data-xf="${k}"]`);
+      if (el && document.activeElement !== el) el.value = v;
+    };
+    set('x', Math.round(xf.cx));
+    set('y', Math.round(xf.cy));
+    set('sx', Math.round(Math.abs(xf.a) * 1000) / 10);
+    set('sy', Math.round(Math.abs(xf.b) * 1000) / 10);
+    const deg = ((xf.angle * 180 / Math.PI) % 360 + 540) % 360 - 180;
+    set('angle', Math.round(deg * 10) / 10);
+  }
+
+  function xfField(k, val) {
+    if (!xf || !Number.isFinite(val)) return;
+    if (k === 'x') xf.cx = val;
+    else if (k === 'y') xf.cy = val;
+    else if (k === 'sx') xf.a = (xf.a < 0 ? -1 : 1) * Math.max(0.01, Math.abs(val) / 100);
+    else if (k === 'sy') xf.b = (xf.b < 0 ? -1 : 1) * Math.max(0.01, Math.abs(val) / 100);
+    else if (k === 'angle') xf.angle = val * Math.PI / 180;
+    requestCompose();
+    drawOverlay();
+    syncXfFields();
+  }
+
+  function xfButton(name) {
+    if (name === 'apply') return applyXf();
+    if (name === 'cancel') return cancelXf();
+    if (!xf) return undefined;
+    if (name === 'flipH') xf.a = -xf.a;
+    if (name === 'flipV') xf.b = -xf.b;
+    requestCompose();
+    drawOverlay();
+    syncXfFields();
+    return undefined;
+  }
+
+  // Deux doigts posés dans le cadre : échelle et rotation (sinon le geste est un zoom)
+  function xfPinchStart() {
+    const [p, q] = [...touches.values()];
+    const li = xfInv(xf, docAt((p.x + q.x) / 2, (p.y + q.y) / 2));
+    if (Math.abs(li.x) > xf.w / 2 || Math.abs(li.y) > xf.h / 2) return false;
+    xf.drag = null;
+    xf.pinch = {
+      d0: Math.max(10, Math.hypot(p.x - q.x, p.y - q.y)), ang0: Math.atan2(q.y - p.y, q.x - p.x),
+      a0: xf.a, b0: xf.b, angle0: xf.angle,
+    };
+    touchLock = true;
+    return true;
+  }
+  function xfPinchMove() {
+    const [p, q] = [...touches.values()];
+    const g = xf.pinch;
+    const r = Math.max(10, Math.hypot(p.x - q.x, p.y - q.y)) / g.d0;
+    xf.a = g.a0 * r;
+    xf.b = g.b0 * r;
+    xf.angle = g.angle0 + Math.atan2(q.y - p.y, q.x - p.x) - g.ang0;
+    requestCompose();
+    drawOverlay();
+    syncXfFields();
+  }
+
   // ---------- Pointeurs ----------
   function onDown(e, pt) {
     cancelAdj();
+    if (xf) { xfDown(e, pt); return; }
+    if (tool === 'transform') { startXf(); return; }
     const S = editSurface();
     if (tool === 'lasso') { lassoDown(e, pt); return; }
     if (tool === 'picker') { pickColor(pt, e.altKey); return; }
@@ -1668,12 +2534,28 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       drag = { tool: 'crop', sx: pt.x, sy: pt.y };
       return;
     }
-    if (tool === 'brush' || tool === 'eraser') {
+    if (tool === 'brush' || tool === 'eraser' || tool === 'clone' || tool === 'heal') {
       if (!S) return;
+      if (tool === 'clone') {
+        // Alt+clic ou « Définir la source » : la source est posée, rien n'est peint
+        if (e.altKey || cloneArmed) {
+          cloneSrc = { x: pt.x, y: pt.y };
+          cloneOff = null;
+          cloneArmed = false;
+          setStatus('Source définie. Peignez pour dupliquer.');
+          drawOverlay();
+          return;
+        }
+        if (!cloneSrc) { setStatus('Alt+clic (ou « Définir la source ») pour choisir la source.'); return; }
+        // Aligné : le décalage source/pinceau est gardé d'un trait à l'autre
+        if (!cloneOff || !opts.cloneAligned) cloneOff = { x: cloneSrc.x - pt.x, y: cloneSrc.y - pt.y };
+      }
       const erase = tool === 'eraser';
       const rgb = hexToRgb(E.cfg.value);
-      drag = { tool: 'brush', erase, S, last: pt, rgb, tiles: new Map(), dirty: null };
-      drag.dirty = brushSegment(S, pt, pt, erase, rgb, drag.tiles);
+      const mode = tool === 'clone' ? 'clone' : tool === 'heal' ? 'heal' : null;
+      const sample = mode === 'clone' ? (opts.cloneSample === 'all' ? composedSnapshot() : S.canvas) : null;
+      drag = { tool: 'brush', mode, erase, S, last: pt, rgb, tiles: new Map(), dirty: null, off: cloneOff, sample };
+      drag.dirty = paintSegment(drag, pt, pt);
       requestCompose();
       return;
     }
@@ -1705,7 +2587,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       E.cropBtn.disabled = !(cropRect.w > 1 && cropRect.h > 1);
       drawOverlay();
     } else if (d.tool === 'brush') {
-      d.dirty = unionRect(d.dirty, brushSegment(d.S, d.last, pt, d.erase, d.rgb, d.tiles));
+      d.dirty = unionRect(d.dirty, paintSegment(d, d.last, pt));
       d.last = pt;
       requestCompose();
     } else if (d.tool === 'rect' || d.tool === 'ellipse') {
@@ -2155,7 +3037,8 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     pushPatch(ADJ[A.kind].label, S, abs, cropImage(before, rr.x, rr.y, rr.w, rr.h), after);
   }
 
-  function showAdjControls(def) {
+  // A : objet d'édition (paramètres de pixels ou d'un calque de réglage) : A.params, A.onChange/onApply/onCancel
+  function showAdjControls(def, A) {
     const box = E.adjBox;
     box.innerHTML = '';
     const head = document.createElement('div');
@@ -2170,26 +3053,25 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       const inp = document.createElement('input');
       inp.type = 'range';
       inp.min = p.min; inp.max = p.max; inp.step = 1;
-      inp.value = adj.params[p.k];
+      inp.value = A.params[p.k];
       const val = document.createElement('span');
       val.textContent = inp.value;
       inp.addEventListener('input', () => {
-        adj.params[p.k] = +inp.value;
+        A.params[p.k] = +inp.value;
         val.textContent = inp.value;
-        livePreview();
+        A.onChange();
       });
       row.append(lab, inp, val);
       box.appendChild(row);
     });
     const btns = document.createElement('div');
     btns.className = 'ie-adj-btns';
-    btns.append(mkBtn('Annuler', 'ie-btn', cancelAdj), mkBtn('Appliquer', 'ie-btn ie-primary', applyAdj));
+    btns.append(mkBtn('Annuler', 'ie-btn', () => A.onCancel()), mkBtn('Appliquer', 'ie-btn ie-primary', () => A.onApply()));
     box.appendChild(btns);
   }
 
   // Éditeur de courbes 256×256 : RVB + canaux, aperçu en direct
-  function showCurvesEditor() {
-    const A = adj;
+  function showCurvesEditor(A) {
     const box = E.adjBox;
     box.innerHTML = '';
     const head = document.createElement('div');
@@ -2215,11 +3097,11 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     const btns = document.createElement('div');
     btns.className = 'ie-adj-btns';
     const reset = mkBtn('Réinitialiser', 'ie-btn', () => {
-      if (adj !== A) return;
+      if (!A.alive()) return;
       A.curve[A.ch] = [[0, 0], [255, 255]];
       refresh();
     });
-    btns.append(reset, mkBtn('Annuler', 'ie-btn', cancelAdj), mkBtn('Appliquer', 'ie-btn ie-primary', applyAdj));
+    btns.append(reset, mkBtn('Annuler', 'ie-btn', () => A.onCancel()), mkBtn('Appliquer', 'ie-btn ie-primary', () => A.onApply()));
     box.append(head, lbl, cv, hint, btns);
 
     const g = cv.getContext('2d');
@@ -2252,7 +3134,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       g.fillStyle = '#fff';
       pts().forEach(([x, y]) => g.fillRect(x - 3, 255 - y - 3, 6, 6));
     };
-    const refresh = () => { livePreview(); draw(); };
+    const refresh = () => { A.onChange(); draw(); };
 
     let idx = -1;
     const pos = (e) => {
@@ -2272,7 +3154,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     };
 
     cv.addEventListener('pointerdown', (e) => {
-      if (adj !== A) return;
+      if (!A.alive()) return;
       const p = pos(e);
       const list = pts();
       let i = near(p);
@@ -2290,7 +3172,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       refresh();
     });
     cv.addEventListener('pointermove', (e) => {
-      if (idx < 0 || adj !== A) return;
+      if (idx < 0 || !A.alive()) return;
       const p = pos(e);
       const list = pts();
       const i = idx;
@@ -2305,7 +3187,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     cv.addEventListener('pointerup', endDrag);
     cv.addEventListener('pointercancel', endDrag);
     cv.addEventListener('dblclick', (e) => {
-      if (adj !== A) return;
+      if (!A.alive()) return;
       const i = near(pos(e));
       const list = pts();
       if (i > 0 && i < list.length - 1) {
@@ -2324,22 +3206,127 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
 
   function startAdj(kind) {
     cancelAdj();
+    closeEditors();
     const def = ADJ[kind];
     const S = editSurface();
-    if (!S || !def) return;
-    const params = {};
-    def.params.forEach((p) => { params[p.k] = p.v; });
-    adj = {
-      kind, surf: S, r: regionRect(), params, scale: 1,
+    if (!def) return;
+    if (!S) { setStatus('Ce réglage s’applique aux pixels du calque (ou à son masque).'); return; }
+    const A = {
+      kind, surf: S, r: regionRect(), params: defaultParams(kind), scale: 1,
       pvOut: null, masked: null, layerPv: null, lowSel: null,
-      curve: def.curve ? { rgb: [[0, 0], [255, 255]], r: [[0, 0], [255, 255]], g: [[0, 0], [255, 255]], b: [[0, 0], [255, 255]] } : null,
+      curve: def.curve ? identityCurves() : null,
       ch: 'rgb',
     };
+    A.alive = () => adj === A;
+    A.onChange = livePreview;
+    A.onApply = applyAdj;
+    A.onCancel = cancelAdj;
+    adj = A;
     if (def.immediate) { applyAdj(); return; }
     prepareAdjPreview(adj);
-    if (def.curve) showCurvesEditor();
-    else showAdjControls(def);
+    if (def.curve) showCurvesEditor(adj);
+    else showAdjControls(def, adj);
     livePreview();
+  }
+
+  // ---------- Taille de l'image, zone de travail, rotations, symétries ----------
+  // Remplace tous les calques (pixels et masques) et la sélection par une version redimensionnée :
+  // draw(ctx, source, W, H) dessine la source dans le nouveau canevas (nw × nh). Un seul pas d'historique.
+  function remapDoc(label, nw, nh, draw) {
+    if (!(Number.isInteger(nw) && Number.isInteger(nh) && nw > 0 && nh > 0 && nw <= MAX_DIM && nh <= MAX_DIM)) {
+      setStatus('Dimensions invalides (1 à 20000 px).');
+      return;
+    }
+    if (nw * nh > MAX_PIX) { setStatus('Mémoire insuffisante pour cette taille (limite 16 Mpx).'); return; }
+    closeEditors();
+    const W = doc.w, H = doc.h;
+    const before = captureState();
+    try {
+      const done = layers.map((L) => {
+        const c = makeCanvas(nw, nh);
+        draw(c.ctx, L.canvas, W, H);
+        let m = null;
+        if (L.mask) {
+          m = makeCanvas(nw, nh);
+          m.ctx.fillStyle = '#fff';
+          m.ctx.fillRect(0, 0, nw, nh);
+          draw(m.ctx, L.mask.canvas, W, H);
+        }
+        return { L, c, m };
+      });
+      let nsel = null;
+      if (selection) {
+        const si = new ImageData(W, H);
+        for (let p = 0; p < W * H; p++) {
+          const i = p * 4, v = selection.mask[p];
+          si.data[i] = si.data[i + 1] = si.data[i + 2] = v;
+          si.data[i + 3] = 255;
+        }
+        const sc = makeCanvas(W, H);
+        sc.ctx.putImageData(si, 0, 0);
+        const oc = makeCanvas(nw, nh);
+        draw(oc.ctx, sc.canvas, W, H);
+        const od = oc.ctx.getImageData(0, 0, nw, nh).data;
+        nsel = new Uint8ClampedArray(nw * nh);
+        for (let p = 0; p < nsel.length; p++) nsel[p] = od[p * 4];
+      }
+      done.forEach(({ L, c, m }) => {
+        L.canvas = c.canvas; L.ctx = c.ctx; touch(L);
+        if (m) { L.mask.canvas = m.canvas; L.mask.ctx = m.ctx; L.mask.alpha = null; touch(L.mask); }
+      });
+      doc.w = nw; doc.h = nh;
+      selection = nsel ? makeSel(nsel) : null;
+      cropRect = null; preview = null; lasso = null;
+      pushState(label, before);
+    } catch (e) {
+      reportError(e);
+    }
+  }
+
+  function resizeImage(nw, nh) {
+    remapDoc('Taille de l’image', nw, nh, (ctx, src) => {
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(src, 0, 0, nw, nh);
+    });
+  }
+
+  // ax, ay : ancrage (0, 0.5 ou 1) ; le contenu existant est placé en conséquence
+  function resizeCanvas(nw, nh, ax, ay) {
+    const ox = Math.round((nw - doc.w) * ax), oy = Math.round((nh - doc.h) * ay);
+    remapDoc('Taille de la zone de travail', nw, nh, (ctx, src) => { ctx.drawImage(src, ox, oy); });
+  }
+
+  function rotateImage(dir) {
+    const W = doc.w, H = doc.h;
+    if (dir === '180') {
+      remapDoc('Rotation 180°', W, H, (ctx, src) => { ctx.setTransform(-1, 0, 0, -1, W, H); ctx.drawImage(src, 0, 0); });
+    } else if (dir === 'cw') {
+      remapDoc('Rotation 90° horaire', H, W, (ctx, src) => { ctx.setTransform(0, 1, -1, 0, H, 0); ctx.drawImage(src, 0, 0); });
+    } else {
+      remapDoc('Rotation 90° antihoraire', H, W, (ctx, src) => { ctx.setTransform(0, -1, 1, 0, 0, W); ctx.drawImage(src, 0, 0); });
+    }
+  }
+
+  function mirrorImage(axis) {
+    const W = doc.w, H = doc.h;
+    if (axis === 'h') remapDoc('Symétrie horizontale', W, H, (ctx, src) => { ctx.setTransform(-1, 0, 0, 1, W, 0); ctx.drawImage(src, 0, 0); });
+    else remapDoc('Symétrie verticale', W, H, (ctx, src) => { ctx.setTransform(1, 0, 0, -1, 0, H); ctx.drawImage(src, 0, 0); });
+  }
+
+  // Boutons de la section Image (lecture des champs puis action)
+  function imageOp(name) {
+    const num = (sel) => Math.round(+root.querySelector(sel).value);
+    if (name === 'resize') return resizeImage(num('[data-imw]'), num('[data-imh]'));
+    if (name === 'canvas') {
+      const [ax, ay] = root.querySelector('[data-anchor]').value.split(',').map(Number);
+      return resizeCanvas(num('[data-cw]'), num('[data-ch]'), ax, ay);
+    }
+    if (name === 'rotR') return rotateImage('cw');
+    if (name === 'rotL') return rotateImage('ccw');
+    if (name === 'rot180') return rotateImage('180');
+    if (name === 'flipH') return mirrorImage('h');
+    if (name === 'flipV') return mirrorImage('v');
+    return undefined;
   }
 
   // ---------- Fichiers ----------
@@ -2412,6 +3399,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
   }
 
   function exportImage(kind) {
+    closeEditors();                    // une transformation en cours est validée avant l'export
     const jpeg = kind === 'jpeg';
     const c = makeCanvas(doc.w, doc.h);
     composeTo(c.ctx, doc.w, doc.h, jpeg ? '#ffffff' : null, false);
@@ -2457,17 +3445,26 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       else if (k === 'a' && !e.shiftKey) act('selall');
       else if (k === 'd' && !e.shiftKey) act('desel');
       else if (k === 'i' && e.shiftKey) act('selinv');
+      else if (k === 't' && !e.shiftKey) setTool('transform');
+      else if (k === 'g') { if (e.shiftKey) ungroupActive(); else groupSelected(); }
       else return;
       e.preventDefault();
       return;
     }
     if (k === 'delete' || k === 'backspace') {
+      if (xf) return;
       if (selection) { deleteSelection(); e.preventDefault(); }
+      return;
+    }
+    if (xf && (k === 'enter' || k === 'escape')) {
+      e.preventDefault();
+      if (k === 'enter') applyXf(); else cancelXf();
       return;
     }
     if (k === 'escape') {
       if (lasso) { lasso = null; drawOverlay(); return; }
       selection = null; cropRect = null; preview = null;
+      if (layerEd) layerEd.onCancel();
       cancelAdj();
       renderAll();
       return;
@@ -2533,6 +3530,17 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     sharpen: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="2"/>',
     grain: '<circle cx="7" cy="7" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="17" cy="17" r="1" fill="currentColor"/><circle cx="17" cy="7" r="1" fill="currentColor"/><circle cx="7" cy="17" r="1" fill="currentColor"/>',
     grid: '<rect x="3" y="3" width="18" height="18" rx="1"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/>',
+    transform: '<path d="M3 8V3h5M16 3h5v5M21 16v5h-5M8 21H3v-5"/><rect x="7" y="7" width="10" height="10"/>',
+    stamp: '<path d="M5 21h14M8 17h8"/><path d="M12 17v-3"/><path d="M9 14h6a2 2 0 0 0 2-2c0-2-2-3-5-3s-5 1-5 3a2 2 0 0 0 2 2z"/><path d="M12 3v3"/>',
+    heal: '<path d="M4 20l6-6"/><path d="M14 4l6 6-8 8-6-6z"/><path d="M4 4l2 2"/>',
+    grip: '<circle cx="9" cy="6" r="1.2" fill="currentColor"/><circle cx="15" cy="6" r="1.2" fill="currentColor"/><circle cx="9" cy="12" r="1.2" fill="currentColor"/><circle cx="15" cy="12" r="1.2" fill="currentColor"/><circle cx="9" cy="18" r="1.2" fill="currentColor"/><circle cx="15" cy="18" r="1.2" fill="currentColor"/>',
+    chevDown: '<path d="M6 9l6 6 6-6"/>',
+    chevRight: '<path d="M9 6l6 6-6 6"/>',
+    flipH: '<path d="M12 3v18M8 7L3 12l5 5zM16 7l5 5-5 5z"/>',
+    flipV: '<path d="M3 12h18M7 8l5-5 5 5zM7 16l5 5 5-5z"/>',
+    rotR: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>',
+    rotL: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
+    rot180: '<path d="M4 12a8 8 0 0 1 14-5.3"/><path d="M18 3v4h-4"/><path d="M20 12a8 8 0 0 1-14 5.3"/><path d="M6 21v-4h4"/>',
   };
   const icon = (name) => `<svg class="ie-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${ICONS[name] || ''}</svg>`;
   const ADJ_ICON = { bc: 'sun', hsl: 'droplet', levels: 'bars', curves: 'spline', bw: 'contrast', invert: 'invert',
@@ -2551,6 +3559,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
 
   // Interrompt l'action en cours (second doigt = navigation) : annule le trait ou le déplacement non validés
   function cancelDrag() {
+    if (xf) xf.drag = null;
     const d = drag;
     drag = null;
     if (!d) return;
@@ -2605,8 +3614,9 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       return;
     }
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (touches.size === 2 && xf && xfPinchStart()) return;
     if (touches.size === 2) { pinchStart(); return; }
-    if (touches.size > 2 || pinch || touchLock) return;
+    if (touches.size > 2 || pinch || touchLock || (xf && xf.pinch)) return;
     if (!wrap.contains(e.target)) return;
     blurField();
     e.preventDefault();
@@ -2615,22 +3625,27 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
 
   function ptrMove(e) {
     if (e.pointerType !== 'touch') {
-      if (drag) onMove(e, toDoc(e));
+      if (xf && xf.drag) xfMove(e, toDoc(e));
+      else if (drag) onMove(e, toDoc(e));
       else if (lasso) { lasso.hover = toDoc(e); drawOverlay(); }
       return;
     }
     if (!touches.has(e.pointerId)) return;
     touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (pinch && touches.size >= 2) pinchMove();
+    if (xf && xf.pinch && touches.size >= 2) xfPinchMove();
+    else if (pinch && touches.size >= 2) pinchMove();
+    else if (xf && xf.drag) xfMove(e, toDoc(e));
     else if (drag) onMove(e, toDoc(e));
   }
 
   function ptrUp(e) {
     if (e.pointerType !== 'touch') {
+      if (xf && xf.drag) { xf.drag = null; return; }
       if (drag) onUp(e, toDoc(e));
       return;
     }
     if (!touches.delete(e.pointerId)) return;
+    if (xf) { xf.drag = null; if (touches.size < 2) xf.pinch = null; }
     if (pinch && touches.size < 2) { pinch = null; renderAll(); }
     if (drag) onUp(e, toDoc(e));
     if (touches.size === 0) touchLock = false;
@@ -2739,14 +3754,16 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     const w = doc.w, h = doc.h, act = activeId, savedAt = Date.now();
     const parts = layers.map((L) => ({
       id: L.id, name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend,
+      type: L.type, parent: L.parent, open: L.open, adj: L.adj,
       pix: canvasPng(L.canvas),
       mask: L.mask ? { enabled: L.mask.enabled, png: canvasPng(L.mask.canvas) } : null,
     }));
     return Promise.all(parts.map(async (p) => ({
       id: p.id, name: p.name, visible: p.visible, opacity: p.opacity, blend: p.blend,
+      type: p.type, parent: p.parent, open: p.open, adj: p.adj,
       pix: await p.pix,
       mask: p.mask ? { enabled: p.mask.enabled, png: await p.mask.png } : null,
-    }))).then((ls) => ({ version: 1, w, h, savedAt, activeId: act, layers: ls }));
+    }))).then((ls) => ({ version: 2, w, h, savedAt, activeId: act, layers: ls }));
   }
 
   // Sauvegarde 2 s après la dernière modification (le geste en cours est attendu)
@@ -2830,10 +3847,12 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     cancelAdj();
     doc.w = w; doc.h = h;
     layers = list;
+    normalizeLayers();
     activeId = list.some((l) => l.id === actId) ? actId : list[list.length - 1].id;
     layerCount = Math.max(layerCount, list.length);
     editTarget = 'pixels'; maskView = null;
     selection = null; cropRect = null; preview = null; lasso = null;
+    multi = new Set(); layerEd = null; xf = null;
     history = [{ label: 'Reprise', undo: null, redo: null }];
     histIdx = 0;
     fitZoom();
@@ -2848,7 +3867,12 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       L.id = s.id;
       L.visible = !!s.visible;
       L.opacity = clamp(+s.opacity, 0, 1);
-      L.blend = BLENDS.some(([v]) => v === s.blend) ? s.blend : 'normal';
+      L.blend = BLENDS.some(([v]) => v === s.blend) || (s.blend === 'pass' && s.type === 'group') ? s.blend : 'normal';
+      L.type = s.type === 'group' || s.type === 'adj' ? s.type : 'pixel';
+      L.parent = s.parent != null ? s.parent : null;
+      L.open = s.open !== false;
+      L.adj = L.type === 'adj' && s.adj && ADJ[s.adj.kind] ? s.adj : null;
+      if (L.type === 'adj' && !L.adj) L.type = 'pixel';
       if (s.mask) {
         L.mask = makeMask(L.id, w, h, 0);
         await drawPng(L.mask.ctx, s.mask.png, w, h);
@@ -3001,6 +4025,26 @@ select.ie-in{width:auto}
 .ie-root input[type=range]::-moz-range-thumb{width:16px;height:16px;border:0;border-radius:50%;background:#fff;box-shadow:0 0 0 3px rgba(34,211,238,.35),0 0 12px rgba(34,211,238,.6)}
 .ie-root input[type=checkbox]{accent-color:var(--accent,#22d3ee)}
 .ie-opt input[type=range]{width:110px}
+.ie-grip,.ie-fold{flex:none;display:inline-flex;align-items:center;justify-content:center;width:22px;height:30px;padding:0;border:0;background:none;color:var(--muted,#9d95b8);cursor:pointer;touch-action:none}
+.ie-grip{cursor:grab}
+.ie-grip .ie-ico,.ie-fold .ie-ico{width:14px;height:14px}
+.ie-lyr.ie-kid{margin-left:16px;border-left:2px solid var(--accent2,#a855f7)}
+.ie-lyr.ie-grp .ie-lname{font-weight:600}
+.ie-lyr.ie-multi{box-shadow:0 0 0 1px var(--accent2,#a855f7)}
+.ie-lyr.ie-dragging{opacity:.45}
+.ie-lyr.ie-drop-before{box-shadow:inset 0 2px 0 var(--accent,#22d3ee)}
+.ie-lyr.ie-drop-after{box-shadow:inset 0 -2px 0 var(--accent,#22d3ee)}
+.ie-adjico{flex:none;display:inline-flex;align-items:center;justify-content:center;width:36px;height:27px;border-radius:6px;color:var(--accent2,#a855f7);background:linear-gradient(135deg,rgba(168,85,247,.35),rgba(168,85,247,.12));border:1px solid rgba(168,85,247,.6)}
+.ie-adjico .ie-ico{width:16px;height:16px}
+.ie-groupico{color:var(--accent,#22d3ee);background:linear-gradient(135deg,rgba(34,211,238,.3),rgba(34,211,238,.1));border-color:rgba(34,211,238,.55)}
+.ie-lyr-add{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:0 14px 10px}
+.ie-lyr-add .ie-in{flex:1 1 100%;min-width:0;width:auto}
+.ie-lyr-add .ie-btn{flex:1 1 100%}
+.ie-img-ops{display:flex;flex-direction:column;gap:8px;padding:10px 14px 12px;border-top:1px solid var(--border,rgba(255,255,255,.08))}
+.ie-sec-sub{color:var(--muted,#9d95b8);font-size:11px;letter-spacing:.06em;text-transform:uppercase}
+.ie-img-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.ie-img-row .ie-in.ie-num{width:76px}
+.ie-img-btns .ie-btn{flex:1 1 calc(50% - 6px);justify-content:flex-start}
 @media (pointer:coarse){
   .ie-btn{height:44px;min-width:44px}
   .ie-tool{width:44px;height:44px}
@@ -3008,6 +4052,9 @@ select.ie-in{width:auto}
   .ie-root input[type=range]::-webkit-slider-thumb{width:24px;height:24px;margin-top:-10px}
   .ie-root input[type=range]::-moz-range-thumb{width:24px;height:24px}
   .ie-eye{width:44px;height:44px}
+  .ie-grip,.ie-fold{width:40px;height:44px}
+  .ie-lyr-add .ie-btn{height:44px}
+  .ie-in{height:40px}
   .ie-lyr{min-height:52px}
   .ie-hi{padding-top:14px;padding-bottom:14px}
   .ie-colors{width:44px;height:96px;margin-top:8px}
@@ -3036,7 +4083,10 @@ select.ie-in{width:auto}
   .ie-stab{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:48px;padding:4px;border:1px solid var(--border,rgba(255,255,255,.08));border-radius:12px;background:var(--panel2,#241e38);color:var(--muted,#9d95b8);font:inherit;font-size:11px;cursor:pointer;transition:background .15s,border-color .15s,box-shadow .15s}
   .ie-stab .ie-ico{width:19px;height:19px}
   .ie-stab.ie-on{color:var(--text,#efecf8);border-color:var(--accent,#22d3ee);background:linear-gradient(135deg,rgba(34,211,238,.3),rgba(34,211,238,.12));box-shadow:0 0 14px rgba(34,211,238,.3)}
-  .ie-sheet-body{flex:none;max-height:55vh;overflow-y:auto;overscroll-behavior:contain;border-top:1px solid var(--border,rgba(255,255,255,.08))}
+  .ie-right{position:relative}
+  .ie-sheet-body{position:absolute;left:0;right:0;bottom:100%;z-index:30;max-height:52vh;overflow-y:auto;overscroll-behavior:contain;background:var(--panel2,#241e38);border:1px solid var(--border2,rgba(255,255,255,.16));border-bottom:0;border-radius:18px 18px 0 0;box-shadow:0 -16px 40px rgba(0,0,0,.55)}
+  .ie-sec-lay .ie-btn[data-act]{flex-direction:column;gap:3px;height:auto;min-height:54px;min-width:60px;padding:6px 4px;font-size:10.5px}
+  .ie-sec-lay .ie-btn[data-act] .ie-lbl{display:block;max-width:74px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.1}
   .ie-root[data-sheet=""] .ie-sheet-body{display:none}
   .ie-root[data-sheet=layers] .ie-sec-adj,.ie-root[data-sheet=layers] .ie-sec-hist,.ie-root[data-sheet=adj] .ie-sec-lay,.ie-root[data-sheet=adj] .ie-sec-hist,.ie-root[data-sheet=hist] .ie-sec-lay,.ie-root[data-sheet=hist] .ie-sec-adj{display:none}
   .ie-sec-h{display:none}
@@ -3083,16 +4133,20 @@ select.ie-in{width:auto}
 
   function buildTemplate() {
     const tools = TOOLS.map((t) =>
-      `<button class="ie-tool" data-tool-id="${t.id}" title="${t.label} (${t.key.toUpperCase()})" aria-label="${t.label}">${icon(t.icon)}</button>`
+      `<button class="ie-tool" data-tool-id="${t.id}" title="${t.key ? t.label + ' (' + t.key.toUpperCase() + ')' : t.label}" aria-label="${t.label}">${icon(t.icon)}</button>`
     ).join('');
     const blends = BLENDS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
+    const adjKindOpts = LAYER_ADJ.map((k) => `<option value="${k}">${ADJ[k].label}</option>`).join('');
+    const anchorOpts = [['0,0', 'Haut gauche'], ['0.5,0', 'Haut'], ['1,0', 'Haut droite'], ['0,0.5', 'Gauche'],
+      ['0.5,0.5', 'Centre'], ['1,0.5', 'Droite'], ['0,1', 'Bas gauche'], ['0.5,1', 'Bas'], ['1,1', 'Bas droite']]
+      .map(([v, l]) => `<option value="${v}"${v === '0.5,0.5' ? ' selected' : ''}>${l}</option>`).join('');
     const fonts = FONTS.map((f) => `<option value="${f}">${f}</option>`).join('');
     const adjBtns = Object.keys(ADJ).map((k) =>
       `<button class="ie-btn ie-adjbtn" data-adj="${k}" title="${ADJ[k].label}">${icon(ADJ_ICON[k])}<span class="ie-lbl">${ADJ[k].label}</span></button>`).join('');
     const fbtn = (act, ic, label) =>
       `<button class="ie-btn" data-act="${act}" title="${label}" aria-label="${label}">${icon(ic)}<span class="ie-lbl">${label}</span></button>`;
-    const lbtn = (a, ic, label) =>
-      `<button class="ie-btn" data-lact="${a}" title="${label}" aria-label="${label}">${icon(ic)}<span class="ie-lbl">${label}</span></button>`;
+    const lbtn = (a, ic, label, tip) =>
+      `<button class="ie-btn" data-lact="${a}" title="${tip || label}" aria-label="${label}">${icon(ic)}<span class="ie-lbl">${label}</span></button>`;
     return `
 <div class="ie-top">
   <button class="ie-btn ie-iconbtn ie-menubtn" data-menu-toggle title="Fichier et sélection" aria-label="Fichier et sélection">${icon('dots')}</button>
@@ -3121,9 +4175,21 @@ select.ie-in{width:auto}
     </div>
   </div>
   <div class="ie-optbar">
-    <label class="ie-opt" data-for="brush eraser">Taille <input type="range" min="1" max="300" value="20" data-o="size"><span data-ov="size">20</span> px</label>
-    <label class="ie-opt" data-for="brush eraser">Dureté <input type="range" min="0" max="100" value="80" data-o="hardness"><span data-ov="hardness">80</span>%</label>
-    <label class="ie-opt" data-for="brush eraser">Opacité <input type="range" min="1" max="100" value="100" data-o="opacity"><span data-ov="opacity">100</span>%</label>
+    <label class="ie-opt" data-for="brush eraser clone heal">Taille <input type="range" min="1" max="300" value="20" data-o="size"><span data-ov="size">20</span> px</label>
+    <label class="ie-opt" data-for="brush eraser clone heal">Dureté <input type="range" min="0" max="100" value="80" data-o="hardness"><span data-ov="hardness">80</span>%</label>
+    <label class="ie-opt" data-for="brush eraser clone heal">Opacité <input type="range" min="1" max="100" value="100" data-o="opacity"><span data-ov="opacity">100</span>%</label>
+    <button class="ie-btn" data-for="clone" data-cloneset title="Définir la source (ou Alt+clic)">${icon('stamp')}<span>Définir la source</span></button>
+    <label class="ie-opt" data-for="clone"><input type="checkbox" checked data-chk="cloneAligned"> Aligné</label>
+    <label class="ie-opt" data-for="clone">Échantillon <select class="ie-in" data-o="cloneSample"><option value="layer">Calque actif</option><option value="all">Tous les calques</option></select></label>
+    <label class="ie-opt" data-for="transform">X <input type="number" class="ie-in ie-num" data-xf="x" aria-label="Position X (px)"></label>
+    <label class="ie-opt" data-for="transform">Y <input type="number" class="ie-in ie-num" data-xf="y" aria-label="Position Y (px)"></label>
+    <label class="ie-opt" data-for="transform">L <input type="number" class="ie-in ie-num" data-xf="sx" min="1" step="0.1" aria-label="Largeur (%)"> %</label>
+    <label class="ie-opt" data-for="transform">H <input type="number" class="ie-in ie-num" data-xf="sy" min="1" step="0.1" aria-label="Hauteur (%)"> %</label>
+    <label class="ie-opt" data-for="transform">Angle <input type="number" class="ie-in ie-num" data-xf="angle" step="0.1" aria-label="Angle (degrés)"> °</label>
+    <button class="ie-btn" data-for="transform" data-xfbtn="flipH" title="Retourner horizontalement">${icon('flipH')}<span>Retourner H</span></button>
+    <button class="ie-btn" data-for="transform" data-xfbtn="flipV" title="Retourner verticalement">${icon('flipV')}<span>Retourner V</span></button>
+    <button class="ie-btn ie-primary" data-for="transform" data-xfbtn="apply" title="Valider (Entrée)">${icon('check')}<span>Valider</span></button>
+    <button class="ie-btn" data-for="transform" data-xfbtn="cancel" title="Annuler (Échap)">${icon('x')}<span>Annuler</span></button>
     <label class="ie-opt" data-for="bucket">Tolérance <input type="range" min="0" max="100" value="32" data-o="tol"><span data-ov="tol">32</span>%</label>
     <label class="ie-opt" data-for="wand">Tolérance <input type="range" min="0" max="255" value="32" data-o="wandTol"><span data-ov="wandTol">32</span></label>
     <label class="ie-opt" data-for="wand"><input type="checkbox" checked data-chk="wandContig"> Contiguë</label>
@@ -3177,6 +4243,10 @@ select.ie-in{width:auto}
           <select class="ie-in" data-lf="blend" title="Mode de fusion" aria-label="Mode de fusion">${blends}</select>
           <label class="ie-opt">Opacité <input type="range" min="0" max="100" value="100" data-lf="opacity"><span data-lov="opacity">100%</span></label>
         </div>
+        <div class="ie-lyr-add">
+          <select class="ie-in" data-adjkind aria-label="Type de calque de réglage" title="Type de calque de réglage">${adjKindOpts}</select>
+          <button class="ie-btn" data-lact="adjnew" title="Ajouter un calque de réglage">${icon('sliders')}<span class="ie-lbl">Calque de réglage</span></button>
+        </div>
         <div class="ie-lyr-list"></div>
         <div class="ie-mbar">
           <button class="ie-btn" data-lact="maskToggle" title="Activer ou désactiver le masque">${icon('mask')}<span class="ie-lbl">Activer/désactiver le masque</span></button>
@@ -3194,13 +4264,43 @@ select.ie-in{width:auto}
           ${lbtn('mask', 'mask', 'Ajouter un masque')}
           ${lbtn('maskapply', 'check', 'Appliquer le masque')}
           ${lbtn('maskdel', 'x', 'Supprimer le masque')}
-          <div class="ie-hint ie-hint-d">Masque : clic = éditer · Maj+clic = activer/désactiver · Alt+clic = voir seul</div>
+          ${lbtn('group', 'folder', 'Grouper', 'Grouper la sélection (Ctrl+G)')}
+          ${lbtn('ungroup', 'x', 'Dissocier', 'Dissocier le groupe (Ctrl+Maj+G)')}
+          ${lbtn('multi', 'check', 'Sélection multiple')}
+          ${lbtn('transform', 'transform', 'Transformer', 'Transformation libre (Ctrl+T)')}
+          ${lbtn('adjedit', 'sliders', 'Modifier le réglage', 'Modifier les réglages du calque de réglage (double-clic sur le calque)')}
+          <div class="ie-hint ie-hint-d">Masque : clic = éditer · Maj+clic = activer/désactiver · Alt+clic = voir seul · Ctrl+G = grouper · Ctrl+Maj+G = dissocier</div>
         </div>
       </section>
       <section class="ie-sec ie-sec-adj">
         <div class="ie-sec-h">Réglages &amp; filtres</div>
         <div class="ie-adj-grid">${adjBtns}</div>
         <div class="ie-adj-ctl"></div>
+        <div class="ie-img-ops">
+          <div class="ie-sec-sub">Taille de l’image</div>
+          <div class="ie-img-row">
+            <input class="ie-in ie-num" type="number" min="1" max="20000" data-imw aria-label="Largeur de l’image (px)">
+            <span class="ie-x">×</span>
+            <input class="ie-in ie-num" type="number" min="1" max="20000" data-imh aria-label="Hauteur de l’image (px)">
+            <label class="ie-opt"><input type="checkbox" checked data-imlink> Lier</label>
+            <button class="ie-btn" data-imop="resize">${icon('fit')}<span>Appliquer</span></button>
+          </div>
+          <div class="ie-sec-sub">Zone de travail</div>
+          <div class="ie-img-row">
+            <input class="ie-in ie-num" type="number" min="1" max="20000" data-cw aria-label="Largeur de la zone (px)">
+            <span class="ie-x">×</span>
+            <input class="ie-in ie-num" type="number" min="1" max="20000" data-ch aria-label="Hauteur de la zone (px)">
+            <select class="ie-in" data-anchor aria-label="Ancrage">${anchorOpts}</select>
+            <button class="ie-btn" data-imop="canvas">${icon('grid')}<span>Appliquer</span></button>
+          </div>
+          <div class="ie-img-row ie-img-btns">
+            <button class="ie-btn" data-imop="rotR" title="Rotation 90° horaire">${icon('rotR')}<span>Rotation 90°</span></button>
+            <button class="ie-btn" data-imop="rotL" title="Rotation 90° antihoraire">${icon('rotL')}<span>Rotation −90°</span></button>
+            <button class="ie-btn" data-imop="rot180" title="Rotation 180°">${icon('rot180')}<span>Rotation 180°</span></button>
+            <button class="ie-btn" data-imop="flipH" title="Symétrie horizontale">${icon('flipH')}<span>Symétrie H</span></button>
+            <button class="ie-btn" data-imop="flipV" title="Symétrie verticale">${icon('flipV')}<span>Symétrie V</span></button>
+          </div>
+        </div>
       </section>
       <section class="ie-sec ie-sec-hist">
         <div class="ie-sec-h">Historique</div>
@@ -3220,6 +4320,11 @@ select.ie-in{width:auto}
     root.dataset.tool = 'move';
     root.dataset.menu = '';
     root.dataset.sheet = '';
+    // Mobile : toucher l'image referme la feuille (elle flotte au-dessus de l'image)
+    const centerEl = root.querySelector('.ie-center');
+    if (centerEl) centerEl.addEventListener('pointerdown', () => {
+      if (root.dataset.sheet && window.matchMedia('(max-width: 820px)').matches) root.dataset.sheet = '';
+    }, true);
     root.innerHTML = buildTemplate();
     rootEl.appendChild(root);
 
@@ -3251,19 +4356,89 @@ select.ie-in{width:auto}
         if (b.dataset.act) { root.dataset.menu = ''; return act(b.dataset.act); }
         if (b.dataset.adj) return startAdj(b.dataset.adj);
         if (b.dataset.lact) return layerAction(b.dataset.lact);
+        if (b.dataset.xfbtn) return xfButton(b.dataset.xfbtn);
+        if (b.dataset.imop) return imageOp(b.dataset.imop);
+        if (b.hasAttribute('data-cloneset')) { cloneArmed = true; setStatus('Cliquez ou tapez la source dans le document.'); return undefined; }
+        if (b.dataset.fold) {
+          const G = layers.find((l) => l.id === +b.dataset.fold);
+          if (G) { G.open = !G.open; renderAll(); }
+          return undefined;
+        }
+        if (b.dataset.grip) return undefined;
         if (b.classList.contains('ie-eye')) return toggleVis(+b.closest('.ie-lyr').dataset.id);
       }
       const mt = e.target.closest('.ie-mthumb');
       if (mt) return maskThumbClick(+mt.closest('.ie-lyr').dataset.id, e);
       const row = e.target.closest('.ie-lyr');
-      if (row) return selectLayerRow(+row.dataset.id);
+      if (row) {
+        const id = +row.dataset.id;
+        if (multiMode || e.shiftKey || e.ctrlKey || e.metaKey) return toggleMulti(id);
+        return selectLayerRow(id);
+      }
       const hi = e.target.closest('.ie-hi');
       if (hi) return goto(+hi.dataset.idx);
       return undefined;
     }));
     E.lyrList.addEventListener('dblclick', (e) => {
+      const row = e.target.closest('.ie-lyr');
+      if (!row) return;
       const n = e.target.closest('.ie-lname');
-      if (n) renameLayer(+n.closest('.ie-lyr').dataset.id, n);
+      if (n) { renameLayer(+row.dataset.id, n); return; }
+      const L = layers.find((l) => l.id === +row.dataset.id);
+      if (L && L.type === 'adj') openAdjLayerEditor(L);
+    });
+
+    // Glisser-déposer des calques par la poignée (souris et doigt)
+    E.lyrList.addEventListener('pointerdown', (e) => {
+      const g = e.target.closest('.ie-grip');
+      if (!g || e.button > 0) return;
+      const row = g.closest('.ie-lyr');
+      rowDrag = { id: +row.dataset.id, pid: e.pointerId, y0: e.clientY, active: false, over: null, after: false };
+      try { g.setPointerCapture(e.pointerId); } catch (err) { /* capture indisponible : le glisser reste utilisable */ }
+    });
+    const clearDropMarks = () => {
+      E.lyrList.querySelectorAll('.ie-dragging,.ie-drop-before,.ie-drop-after')
+        .forEach((r) => r.classList.remove('ie-dragging', 'ie-drop-before', 'ie-drop-after'));
+    };
+    E.lyrList.addEventListener('pointermove', (e) => {
+      const d = rowDrag;
+      if (!d || e.pointerId !== d.pid) return;
+      if (!d.active) {
+        if (Math.abs(e.clientY - d.y0) < 6) return;
+        d.active = true;
+        const self = E.lyrList.querySelector(`.ie-lyr[data-id="${d.id}"]`);
+        if (self) self.classList.add('ie-dragging');
+      }
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const row = el ? el.closest('.ie-lyr') : null;
+      E.lyrList.querySelectorAll('.ie-drop-before,.ie-drop-after').forEach((r) => r.classList.remove('ie-drop-before', 'ie-drop-after'));
+      if (row && +row.dataset.id !== d.id) {
+        const r = row.getBoundingClientRect();
+        d.after = e.clientY > r.top + r.height / 2;
+        d.over = +row.dataset.id;
+        row.classList.add(d.after ? 'ie-drop-after' : 'ie-drop-before');
+      } else d.over = null;
+    });
+    const endRowDrag = (e) => {
+      const d = rowDrag;
+      if (!d || e.pointerId !== d.pid) return;
+      rowDrag = null;
+      clearDropMarks();
+      if (d.active && d.over != null) dropLayer(d.id, d.over, d.after);
+    };
+    E.lyrList.addEventListener('pointerup', endRowDrag);
+    E.lyrList.addEventListener('pointercancel', endRowDrag);
+
+    // Champs de la transformation et des dimensions de l'image
+    root.querySelectorAll('[data-xf]').forEach((inp) => {
+      inp.addEventListener('change', () => xfField(inp.dataset.xf, +inp.value));
+    });
+    const imw = q('[data-imw]'), imh = q('[data-imh]');
+    imw.addEventListener('input', () => {
+      if (q('[data-imlink]').checked && +imw.value > 0) imh.value = Math.max(1, Math.round(+imw.value * doc.h / doc.w));
+    });
+    imh.addEventListener('input', () => {
+      if (q('[data-imlink]').checked && +imh.value > 0) imw.value = Math.max(1, Math.round(+imh.value * doc.w / doc.h));
     });
 
     E.blend.addEventListener('change', () => {
@@ -3364,8 +4539,6 @@ select.ie-in{width:auto}
     saveNow() { return flushSave(); },
     // Hook de test non documenté
     _debug: {
-      // Test seulement : crée un document sans le plafond de taille (mesures à 8000 × 8000)
-      resetUnchecked(w, h) { resetDocument(w, h, [makeWhite(w, h)]); },
       selectionCount() {
         if (!selection) return 0;
         let n = 0;
@@ -3376,8 +4549,17 @@ select.ie-in{width:auto}
       selectionAt(x, y) { return selection ? selection.mask[y * doc.w + x] : 0; },
       selectionBBox() { return selection ? { ...selection.bbox } : null; },
       layers() {
-        return layers.map((L) => ({ id: L.id, name: L.name, mask: !!L.mask, maskEnabled: L.mask ? L.mask.enabled : null }));
+        return layers.map((L) => ({
+          id: L.id, name: L.name, type: L.type, parent: L.parent, blend: L.blend, opacity: L.opacity,
+          mask: !!L.mask, maskEnabled: L.mask ? L.mask.enabled : null,
+        }));
       },
+      transformActive() { return !!xf; },
+      transformHandles() {
+        if (!xf) return null;
+        return xfHandles().map((h) => ({ rot: !!h.rot, hx: h.hx, hy: h.hy, x: h.p.x, y: h.p.y }));
+      },
+      layerEditing() { return !!layerEd; },
       maskAt(id, x, y) {
         const L = layers.find((l) => l.id === id);
         if (!L || !L.mask) return null;
@@ -3431,6 +4613,8 @@ select.ie-in{width:auto}
  * Version 3 : enregistrement PCM (AudioWorklet, repli ScriptProcessor, MediaRecorder en dernier recours),
  * panneau Enregistrement (entrée, vumètre, latence, calibrage, décompte, retour micro),
  * habillage « Studio nocturne » (DESIGN.md) et mise en page mobile (≤ 820 px).
+ * Partie 2 (iPhone) : casque Bluetooth + micro intégré, stratégies de routage audio (A, B, C, D),
+ * test d'écoute guidé, mémorisation de la stratégie qui marche.
  */
 (function () {
   'use strict';
@@ -3450,6 +4634,15 @@ select.ie-in{width:auto}
   var NARROW_Q = '(max-width: 820px)';
   var LAT_KEY = 'sf_audio_latency_ms';
   var LAT_MAX = 600;        // compensation de latence maximale (ms)
+  var ROUTE_KEY = 'sf_audio_route_ok'; // stratégie de routage qui a marché (mémorisée)
+  var ROUTE_ORDER = ['A', 'B', 'D', 'C']; // ordre des essais du test guidé
+  var ROUTES = {
+    A: { t: 'session « lecture + enregistrement » posée avant le micro', media: false },
+    B: { t: 'session automatique, puis « lecture + enregistrement » après le micro', media: false },
+    C: { t: 'session automatique (réglage d’origine de Safari)', media: false },
+    D: { t: 'instru jouée par un lecteur média (élément audio)', media: true }
+  };
+  var BT_RE = /jbl|airpods|bluetooth|beats|casque|headset|headphone|tune|buds|écouteur|ecouteur/i;
   var HOT_PEAK = 0.8913;    // -1 dBFS : seuil « Trop fort »
   var CAL_N = 8, CAL_STEP = 0.75; // calibrage : 8 clics, un toutes les 0,75 s
   var TRACK_COLORS = ['#7c5cff', '#2bb3a3', '#e0a526', '#e05a7a', '#4fa3e0', '#8bc34a', '#ff8a4c', '#b07cff'];
@@ -3491,6 +4684,11 @@ select.ie-in{width:auto}
   var CURVES = [['lin', 'Linéaire'], ['eqp', 'Puissance constante'], ['exp', 'Exponentielle']];
   var MODES = [['shuffle', 'Shuffle'], ['slip', 'Slip'], ['grid', 'Grid'], ['spot', 'Spot']];
   var COUNT_IN = [['0', 'Aucun'], ['4', '1 mesure'], ['8', '2 mesures']];
+  var XF_LEN = 0.5, CV_MAX_W = 16384, CV_CACHE_MAX = 60; // fondu enchaîné auto (s), largeur max d'un canevas, taille du cache
+  var AUTO_H = 96, AUTO_REC_DT = 0.05, AUTO_MODES = [['off', 'Off'], ['read', 'Read'], ['touch', 'Touch'], ['latch', 'Latch'], ['write', 'Write']];
+  var PRE_OPTS = [0, 0.5, 1, 1.5, 2, 3, 4], EXP_SR = [['44100', '44,1 kHz'], ['48000', '48 kHz']], EXP_BITS = [['16', '16 bits'], ['24', '24 bits']];
+  var LONG_MIN = 15 * 60, MEM_MAX_MB = 300, MEM_MAX_MB_LOW = 150; // garde-fous d'import
+  var NS_SVG = 'http://www.w3.org/2000/svg';
 
   // ---------- État ----------
   var st = {
@@ -3505,7 +4703,7 @@ select.ie-in{width:auto}
     masterDb: 0, exporting: false, resuming: false,
     undo: [], redo: [], last: null, lastSer: '', histTimer: null, histLabel: '',
     stripOpen: false, spot: null, narrow: false, sheet: false, redraw: false, anchor: null,
-    mic: { dev: '', voice: false, latency: 0, countIn: 0, monitor: false, monDb: 0, instru: 100 },
+    mic: { dev: '', voice: false, latency: 0, countIn: 0, monitor: false, monDb: 0, instru: 100, route: 'auto' },
     takes: [], // prises (buffer + paramètres) ; une prise active possède un clip dont takeId vaut son id
     booth: { hp: null, micErr: false, count: true, start: 'zero', lastId: null, acap: false, prev: null, prevId: null },
     sess: { pending: false, ok: true, found: null, saved: {}, bufs: [], lastKey: '', seq: 0, busy: null, again: false, t: null }
@@ -3517,12 +4715,20 @@ select.ie-in{width:auto}
     on: false, at: 0, ending: false, abort: false,
     chunks: [], nSamp: 0, pk: [], take: null, mr: null, lastTake: null,
     live: null, testing: false, hotUntil: 0,
-    cal: null, calVal: null, calMsg: ''
+    cal: null, calVal: null, calMsg: '',
+    devs: [], labels: false,            // entrées audio connues (libellés après une autorisation)
+    micName: '', micState: '', openRoute: '', // micro réellement ouvert : libellé, '' / 'ok' / 'warn'
+    el: null, media: null, wantMedia: false, // lecteur média (stratégie D) et son WAV rendu
+    guide: null                          // test d'écoute guidé en cours
   };
+  st.markers = []; st.markerSeq = 0; st.selSet = []; st.clipboard = null;
+  st.exp = { sr: 44100, bits: 16, master: true }; st.preRoll = 2; st.recMode = null; st.mkOpen = false;
   var stripCache = null;
   var touchPts = {}, pinch = null;
   var pBuf = new WeakMap(); // buffer -> clé de sauvegarde ; wake = verrou d'écran pendant une prise
   var wake = null;
+  var autoRt = {};   // état d'exécution de l'automation par piste (non sauvegardé)
+  var cvCache = new Map(); // canevas de formes d'onde, clé = contenu
 
   // ---------- Utilitaires ----------
   function uid(p) { return p + (st.nextId++); }
@@ -3626,9 +4832,20 @@ select.ie-in{width:auto}
     sliders: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>'
   };
   ICONS.bt = '<path d="m7 7 10 10-5 5V2l5 5L7 17"/>';
+  ICONS.phone = '<rect x="7" y="2" width="10" height="20" rx="2"/><line x1="11" y1="18" x2="13" y2="18"/>';
+  ICONS.ear = '<path d="M6 8.5a6 6 0 0 1 12 0c0 3-2 4-2 7a3 3 0 0 1-6 0"/>';
   ICONS.speaker = '<rect x="4" y="2" width="16" height="20" rx="2"/><circle cx="12" cy="14" r="4"/><line x1="12" y1="6" x2="12.01" y2="6"/>';
   ICONS.check = '<polyline points="20 6 9 17 4 12"/>';
   ICONS.retry = '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>';
+  ICONS.copy = '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>';
+  ICONS.cut = '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.5 7.5 20 19M20 5 8.5 16.5"/>';
+  ICONS.paste = '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/>';
+  ICONS.dup = '<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V4a2 2 0 0 1 2-2h12"/><line x1="14.5" y1="12" x2="14.5" y2="17"/><line x1="12" y1="14.5" x2="17" y2="14.5"/>';
+  ICONS.xf = '<path d="M3 5c6 0 6 14 18 14"/><path d="M3 19c6 0 6-14 18-14"/>';
+  ICONS.flag = '<path d="M5 22V3"/><path d="M5 4h12l-2 4 2 4H5"/>';
+  ICONS.mklist = '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>';
+  ICONS.auto = '<path d="M3 17c4-8 7 4 10-4s5-2 8-6"/>';
+  ICONS.punch = '<path d="M4 6v12"/><circle cx="14" cy="12" r="6"/>';
   function icon(name) {
     if (!ICONS[name]) return '';
     return '<svg class="as-ico" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + ICONS[name] + '</svg>';
@@ -3710,7 +4927,7 @@ select.ie-in{width:auto}
   }
   function hideBanner() { if (st.ui.banner) st.ui.banner.hidden = true; }
 
-  // ---------- Forme d'onde (cache des crêtes par tampon) ----------
+  // ---------- Forme d'onde : pyramide de crêtes et cache de canevas par contenu ----------
   var peakCache = new WeakMap();
   var bufIds = new WeakMap(), bufSeq = 0;
   function bufId(b) { var i = bufIds.get(b); if (!i) { bufSeq++; i = bufSeq; bufIds.set(b, i); } return i; }
@@ -3728,10 +4945,25 @@ select.ie-in{width:auto}
       }
       mins[i] = mn; maxs[i] = mx;
     }
-    p = { mins: mins, maxs: maxs, n: n };
+    p = { mins: mins, maxs: maxs, n: n, lv: [] };
     peakCache.set(buf, p);
     return p;
   }
+  // Niveau L de la pyramide : chaque niveau regroupe deux fois plus d'échantillons (BUCKET * 2^L)
+  function peakLevel(p, L) {
+    if (L === 0) return { mins: p.mins, maxs: p.maxs, n: p.n, size: BUCKET };
+    if (p.lv[L]) return p.lv[L];
+    var src = peakLevel(p, L - 1), n = Math.ceil(src.n / 2), mins = new Float32Array(n), maxs = new Float32Array(n), i;
+    for (i = 0; i < n; i++) {
+      var a = 2 * i, mn = src.mins[a], mx = src.maxs[a];
+      if (a + 1 < src.n) { if (src.mins[a + 1] < mn) mn = src.mins[a + 1]; if (src.maxs[a + 1] > mx) mx = src.maxs[a + 1]; }
+      mins[i] = mn; maxs[i] = mx;
+    }
+    p.lv[L] = { mins: mins, maxs: maxs, n: n, size: BUCKET * Math.pow(2, L) };
+    return p.lv[L];
+  }
+  // Plus petit niveau dont une colonne couvre au plus environ une case (spb = échantillons par colonne)
+  function levelFor(spb) { var L = 0; while (L < 20 && BUCKET * Math.pow(2, L + 1) <= spb) L++; return L; }
   // Forme d'un fondu : u dans [0,1], 0 -> 1 (montée) ; la descente utilise shape(1 - v)
   function fadeShape(curve, u) {
     if (u <= 0) return 0;
@@ -3747,66 +4979,89 @@ select.ie-in{width:auto}
     if (clip.fadeOut > 0 && t > E - clip.fadeOut) v *= fadeShape(clip.curve, (E - t) / clip.fadeOut);
     return v;
   }
-  function drawClip(cv, clip) {
-    var g = cv.getContext('2d'), W = cv.width, H = cv.height, pps = st.pxPerSec;
-    g.clearRect(0, 0, W, H);
-    var p = getPeaks(clip.buffer), sr = clip.buffer.sampleRate, mid = H / 2;
-    var amp = dbToGain(clip.gainDb || 0);
+  // Dessine la forme d'onde d'un clip sur la fenêtre [x0, x0 + cv.width[ (en px du clip, largeur W)
+  function drawClip(cv, clip, W, x0) {
+    var g = cv.getContext('2d'), cw = cv.width, H = cv.height, dur = clip.duration;
+    g.clearRect(0, 0, cw, H);
+    var buf = clip.buffer, sr = buf.sampleRate, mid = H / 2, amp = dbToGain(clip.gainDb || 0);
+    var spb = sr * dur / W, p0 = getPeaks(buf), L = levelFor(spb), p = peakLevel(p0, L), size = p.size;
+    var off = clip.offset * sr, x, X, b, b0, b1, mn, mx, top, bot, y1, y2;
     g.fillStyle = 'rgba(255,255,255,0.85)';
     if (p.n > 0) {
-      for (var x = 0; x < W; x++) {
-        var b0 = Math.floor((clip.offset + x / pps) * sr / BUCKET);
-        var b1 = Math.ceil((clip.offset + (x + 1) / pps) * sr / BUCKET);
-        if (b1 <= b0) b1 = b0 + 1;
-        b0 = clamp(b0, 0, p.n - 1);
-        b1 = clamp(b1, b0 + 1, p.n);
-        var mn = 0, mx = 0;
-        for (var b = b0; b < b1; b++) { if (p.mins[b] < mn) mn = p.mins[b]; if (p.maxs[b] > mx) mx = p.maxs[b]; }
-        var top = clamp(mx * amp, 0, 1), bot = clamp(mn * amp, -1, 0);
-        var y1 = mid - top * mid * 0.92, y2 = mid - bot * mid * 0.92;
+      for (x = 0; x < cw; x++) {
+        X = x0 + x;
+        b0 = clamp(Math.floor((off + X * spb) / size), 0, p.n - 1);
+        b1 = clamp(Math.ceil((off + (X + 1) * spb) / size), b0 + 1, p.n);
+        mn = 0; mx = 0;
+        for (b = b0; b < b1; b++) { if (p.mins[b] < mn) mn = p.mins[b]; if (p.maxs[b] > mx) mx = p.maxs[b]; }
+        top = clamp(mx * amp, 0, 1); bot = clamp(mn * amp, -1, 0);
+        y1 = mid - top * mid * 0.92; y2 = mid - bot * mid * 0.92;
         g.fillRect(x, y1, 1, Math.max(1, y2 - y1));
       }
     }
-    // Courbes réelles des fondus
-    var fi = Math.min(clip.fadeIn * pps, W), fo = Math.min(clip.fadeOut * pps, W);
+    // Courbes réelles des fondus (dans la fenêtre dessinée)
+    var ppsC = W / dur, fi = clip.fadeIn * ppsC, fo = clip.fadeOut * ppsC, pen = false, v, yv;
     if (fi > 0 || fo > 0) {
       g.strokeStyle = 'rgba(10,8,20,0.8)';
       g.lineWidth = 1.5;
       g.beginPath();
-      var xi, yv;
-      if (fi > 0) {
-        for (xi = 0; xi <= fi; xi += 1) {
-          yv = H - 1 - fadeShape(clip.curve, xi / fi) * (H - 2);
-          if (xi === 0) g.moveTo(xi, yv); else g.lineTo(xi, yv);
-        }
-      }
-      if (fo > 0) {
-        for (xi = 0; xi <= fo; xi += 1) {
-          yv = H - 1 - fadeShape(clip.curve, 1 - xi / fo) * (H - 2);
-          if (xi === 0) g.moveTo(W - fo + xi, yv); else g.lineTo(W - fo + xi, yv);
-        }
+      for (x = 0; x < cw; x++) {
+        X = x0 + x;
+        if (fi > 0 && X < fi) v = fadeShape(clip.curve, X / fi);
+        else if (fo > 0 && X > W - fo) v = fadeShape(clip.curve, (W - X) / fo);
+        else { pen = false; continue; }
+        yv = H - 1 - v * (H - 2);
+        if (!pen) { g.moveTo(x, yv); pen = true; } else g.lineTo(x, yv);
       }
       g.stroke();
     }
   }
-  function clipCanvas(clip, W, H) {
-    var cv = el('canvas');
-    cv.width = W; cv.height = H;
-    cv.style.width = W + 'px'; cv.style.height = H + 'px';
-    var key = [st.pxPerSec, clip.offset, clip.duration, clip.fadeIn, clip.fadeOut, clip.curve, clip.gainDb, W, H].join('|');
-    var g = cv.getContext('2d');
-    if (clip._cv && clip._key === key) {
-      g.drawImage(clip._cv, 0, 0);
-    } else {
-      drawClip(cv, clip);
-      var c2 = document.createElement('canvas');
-      c2.width = W; c2.height = H;
-      c2.getContext('2d').drawImage(cv, 0, 0);
-      clip._cv = c2; clip._key = key;
+  // Canevas d'un clip sur la fenêtre visible ; mis en cache par contenu (buffer, zone, fondus, gain, zoom, fenêtre)
+  function clipCanvas(clip, W, H, span) {
+    var x0 = span[0], cw = Math.max(1, Math.min(span[1] - span[0], CV_MAX_W));
+    var key = [bufId(clip.buffer), clip.offset, clip.duration, clip.fadeIn, clip.fadeOut, clip.curve, clip.gainDb || 0, W, x0, cw, H].join('|');
+    var src = cvCache.get(key);
+    if (!src) {
+      src = document.createElement('canvas');
+      src.width = cw; src.height = H;
+      drawClip(src, clip, W, x0);
+      if (cvCache.size >= CV_CACHE_MAX) cvCache.delete(cvCache.keys().next().value);
+      cvCache.set(key, src);
     }
+    var cv = el('canvas');
+    cv.width = cw; cv.height = H;
+    cv.style.left = x0 + 'px';
+    cv.style.width = cw + 'px'; cv.style.height = H + 'px';
+    cv.getContext('2d').drawImage(src, 0, 0);
     return cv;
   }
-
+  // Partie du clip réellement visible à l'écran (px du clip), avec une marge de part et d'autre
+  function viewRange(clip, W) {
+    var sc = st.ui.scroller;
+    if (!sc || !sc.clientWidth) return [0, Math.min(W, CV_MAX_W)];
+    var left = hdrW() + clip.start * st.pxPerSec;
+    return [sc.scrollLeft - left, sc.scrollLeft + sc.clientWidth - left];
+  }
+  function visibleSpan(clip, W) {
+    var r = viewRange(clip, W), margin = 300;
+    var x0 = clamp(Math.floor(r[0] - margin), 0, W), x1 = clamp(Math.ceil(r[1] + margin), 0, W);
+    if (x1 <= x0) x1 = Math.min(W, x0 + 1);
+    if (x1 - x0 > CV_MAX_W) x1 = x0 + CV_MAX_W;
+    return [x0, x1];
+  }
+  // Au défilement : redessine seulement les clips dont la partie visible sort de la fenêtre dessinée
+  function repaintVisibleClips() {
+    if (!st.root) return;
+    st.root.querySelectorAll('.as-clip').forEach(function (elc) {
+      var clip = elc._clip, cv = elc.querySelector('canvas');
+      if (!clip || !cv || !elc._span) return;
+      var r = viewRange(clip, elc._W), old = elc._span;
+      if (r[0] >= old[0] && r[1] <= old[1]) return;
+      var sp = visibleSpan(clip, elc._W);
+      elc.replaceChild(clipCanvas(clip, elc._W, CLIP_H, sp), cv);
+      elc._span = sp;
+    });
+  }
   // ---------- Inserts et graphe audio (partagés lecture / export) ----------
   function makeIR(c, dur) {
     var sr = c.sampleRate, len = Math.max(1, Math.floor(sr * dur)), ir = c.createBuffer(2, len, sr);
@@ -3885,10 +5140,116 @@ select.ie-in{width:auto}
     if (t.type === 'aux' && feedsSolo(t)) return dbToGain(t.db);
     return 0;
   }
-  // Construit la chaîne complète : pistes (inserts -> mute -> pan -> fader -> vumètre) -> master -> monitoring -> destination
-  // live = true pour la lecture en temps réel uniquement (le gain de monitoring ne touche pas l'export).
-  function buildGraph(c, dest, live) {
-    var g = { c: c, all: [], sources: [], ins: {}, trackIn: {}, trackGain: {}, trackGate: {}, trackPan: {}, trackAn: {}, sendGain: {}, masterAn: null, mGain: null, mon: null };
+  // ---------- Automation : volume et pan par piste (points, modes Read / Touch / Latch / Write) ----------
+  function autoOf(t) {
+    if (!t.auto) t.auto = { mode: 'off', show: false, param: 'vol', vol: [], pan: [] };
+    return t.auto;
+  }
+  function rtOf(t) {
+    var r = autoRt[t.id];
+    if (!r) r = autoRt[t.id] = { tv: false, tp: false, lv: false, lp: false, rv: null, rp: null };
+    return r;
+  }
+  // Une courbe pilote le paramètre quand elle a des points et que le mode la lit (Read, ou Touch / Latch hors prise en main)
+  function driving(t, p) {
+    var a = t.auto, pts = a && a[p];
+    if (!pts || !pts.length) return false;
+    var rt = rtOf(t);
+    if (a.mode === 'read') return true;
+    if (a.mode === 'touch') return !rt[p === 'vol' ? 'tv' : 'tp'];
+    if (a.mode === 'latch') return !rt[p === 'vol' ? 'lv' : 'lp'];
+    return false;
+  }
+  function r3(x) { return Math.round(x * 1000) / 1000; }
+  // Valeur d'une courbe au temps t (points triés, interpolation linéaire, bornes tenues)
+  function autoValueAt(pts, t) {
+    var n = pts.length;
+    if (t <= pts[0].t) return pts[0].v;
+    if (t >= pts[n - 1].t) return pts[n - 1].v;
+    var lo = 0, hi = n - 1, mid;
+    while (hi - lo > 1) { mid = (lo + hi) >> 1; if (pts[mid].t <= t) lo = mid; else hi = mid; }
+    var a = pts[lo], b = pts[hi], f = b.t > a.t ? (t - a.t) / (b.t - a.t) : 0;
+    return a.v + (b.v - a.v) * f;
+  }
+  // Programme la courbe sur un AudioParam, à partir de la position timeline P (temps ctx C0)
+  function scheduleAuto(ap, pts, P, C0, conv) {
+    ap.cancelScheduledValues(C0);
+    ap.setValueAtTime(conv(autoValueAt(pts, P)), C0);
+    for (var i = 0; i < pts.length; i++) {
+      if (pts[i].t > P + 1e-6) ap.linearRampToValueAtTime(conv(pts[i].v), C0 + (pts[i].t - P));
+    }
+  }
+  function volConv(db) { return dbToGain(db); }
+  function panConv(v) { return clamp(v, -100, 100) / 100; }
+  // Prise en main (Touch / Latch) : le contrôle pilote le paramètre ; la courbe reprend au relâchement (Touch)
+  function touchStart(t, p) {
+    var a = t.auto;
+    if (!a || !st.playing) return;
+    var rt = rtOf(t);
+    if (a.mode === 'touch') rt[p === 'vol' ? 'tv' : 'tp'] = true;
+    else if (a.mode === 'latch') rt[p === 'vol' ? 'lv' : 'lp'] = true;
+    else return;
+    applyMixLive();
+  }
+  function touchEnd(t, p) {
+    var a = t.auto, rt = rtOf(t), key = p === 'vol' ? 'tv' : 'tp';
+    if (!a || a.mode !== 'touch' || !rt[key]) return;
+    rt[key] = false;
+    if (st.playing) reloadPlayback();
+  }
+  // Pendant la lecture en Write / Touch / Latch : échantillonne fader et pan toutes les 50 ms
+  function autoRecTick(pos) {
+    st.tracks.forEach(function (t) {
+      var a = t.auto;
+      if (!a || a.mode === 'off' || a.mode === 'read') return;
+      var rt = rtOf(t);
+      var wv = a.mode === 'write' || (a.mode === 'touch' && rt.tv) || (a.mode === 'latch' && rt.lv);
+      var wp = a.mode === 'write' || (a.mode === 'touch' && rt.tp) || (a.mode === 'latch' && rt.lp);
+      if (wv) pushAutoSample(rt, 'rv', pos, t.db);
+      if (wp) pushAutoSample(rt, 'rp', pos, t.pan);
+    });
+  }
+  function pushAutoSample(rt, key, pos, v) {
+    var arr = rt[key] || (rt[key] = []), last = arr[arr.length - 1];
+    if (!last || pos - last.t >= AUTO_REC_DT - 1e-9) arr.push({ t: pos, v: v });
+  }
+  // Fin d'un enregistrement d'automation : simplification (seuil de variation) puis fusion dans la courbe
+  function autoRecFinish() {
+    var changed = false;
+    st.tracks.forEach(function (t) {
+      var rt = autoRt[t.id];
+      if (!rt) return;
+      [['vol', 'rv'], ['pan', 'rp']].forEach(function (pr) {
+        var s = rt[pr[1]];
+        rt[pr[1]] = null;
+        if (s && s.length) { autoMerge(t, pr[0], s); changed = true; }
+      });
+    });
+    return changed;
+  }
+  function autoMerge(t, p, s) {
+    var a = autoOf(t), tol = p === 'vol' ? 0.25 : 0.5, keep = [s[0]], i, last;
+    for (i = 1; i < s.length; i++) {
+      last = keep[keep.length - 1];
+      if (Math.abs(s[i].v - last.v) > tol || s[i].t - last.t > 0.5) keep.push(s[i]);
+    }
+    var end = s[s.length - 1], from = s[0].t, to = end.t;
+    if (keep[keep.length - 1] !== end) keep.push(end);
+    a[p] = a[p].filter(function (q) { return q.t < from - 1e-6 || q.t > to + 1e-6; })
+      .concat(keep.map(function (q) { return { t: r3(q.t), v: r3(q.v) }; }))
+      .sort(function (x, y) { return x.t - y.t; });
+  }
+  function autoRecDiscard() { Object.keys(autoRt).forEach(function (k) { autoRt[k].rv = null; autoRt[k].rp = null; }); }
+  function autoReset() {
+    Object.keys(autoRt).forEach(function (k) { var r = autoRt[k]; r.tv = false; r.tp = false; r.lv = false; r.lp = false; });
+  }
+  // Construit la chaîne complète : pistes (inserts -> automation/fader -> mute -> pan -> vumètre) -> master -> monitoring -> destination
+  // live = true pour la lecture temps réel (le gain de monitoring ne touche pas l'export).
+  // opts : P, C0 (position et temps ctx de départ pour l'automation) ; only (piste seule, rendu des pistes séparées) ; master (inclure le master)
+  function buildGraph(c, dest, live, opts) {
+    opts = opts || {};
+    var P0 = opts.P != null ? opts.P : 0, C00 = opts.C0 != null ? opts.C0 : 0, only = opts.only || null;
+    var g = { c: c, all: [], sources: [], ins: {}, trackIn: {}, trackGain: {}, trackGate: {}, trackPan: {}, trackAn: {}, sendGain: {}, masterAn: null, mGain: null, mon: null, autoV: {}, autoP: {} };
     function add(n) { g.all.push(n); return n; }
     var mIn = add(c.createGain()), mGain = add(c.createGain());
     var split = add(c.createChannelSplitter(2));
@@ -3909,6 +5270,7 @@ select.ie-in{width:auto}
     g.mGain = mGain; g.masterAn = [anL, anR]; g.mon = mon;
     var sends = [];
     st.tracks.forEach(function (t) {
+      var mine = !only || t.id === only.id;
       var tin = add(c.createGain()), prev = tin;
       for (var i = 0; i < 4; i++) {
         var ins = t.inserts[i];
@@ -3920,17 +5282,24 @@ select.ie-in{width:auto}
         prev = node.output;
         g.ins[t.id + ':' + i] = node;
       }
+      var gv = (only && mine) ? (t.muted ? 0 : dbToGain(t.db)) : trackGainValue(t);
       var gate = add(c.createGain());
-      gate.gain.value = trackGainValue(t) > 0 ? 1 : 0;
+      gate.gain.value = gv > 0 ? 1 : 0;
       var pan = add(c.createStereoPanner());
       pan.pan.value = clamp(t.pan, -100, 100) / 100;
       var tg = add(c.createGain());
-      tg.gain.value = trackGainValue(t);
+      tg.gain.value = gv;
       var an = add(c.createAnalyser());
       an.fftSize = 512;
-      prev.connect(gate); gate.connect(pan); pan.connect(tg); tg.connect(an); an.connect(mIn);
+      prev.connect(gate); gate.connect(pan); pan.connect(tg); tg.connect(an);
+      if (!only || mine) {
+        if (only && !opts.master) an.connect(dest); else an.connect(mIn);
+      }
       g.trackIn[t.id] = tin; g.trackGain[t.id] = tg; g.trackGate[t.id] = gate;
       g.trackPan[t.id] = pan; g.trackAn[t.id] = an;
+      // Automation : le GainNode de fader et le StereoPanner suivent la courbe (lecture, export, stems)
+      if ((!only || mine) && driving(t, 'vol')) { scheduleAuto(tg.gain, t.auto.vol, P0, C00, volConv); g.autoV[t.id] = true; }
+      if ((!only || mine) && driving(t, 'pan')) { scheduleAuto(pan.pan, t.auto.pan, P0, C00, panConv); g.autoP[t.id] = true; }
       if (t.type !== 'aux') {
         (t.sends || []).forEach(function (s, k) {
           if (!s.dest) return;
@@ -4000,7 +5369,8 @@ select.ie-in{width:auto}
         return { id: c.id, trackId: c.trackId, name: c.name, buffer: c.buffer, start: c.start, offset: c.offset,
           duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null };
       }),
-      takes: st.takes.map(function (k) { return Object.assign({}, k); })
+      takes: st.takes.map(function (k) { return Object.assign({}, k); }),
+      markers: st.markers.map(cloneP)
     };
   }
   function serial(s) {
@@ -4008,10 +5378,13 @@ select.ie-in{width:auto}
   }
   function applySnap(s) {
     var selId = st.selClip && st.selClip.id;
+    autoRecDiscard();
     st.masterDb = s.masterDb;
     st.tracks = s.tracks.map(cloneP);
     st.clips = s.clips.map(function (c) { return { id: c.id, trackId: c.trackId, name: c.name, buffer: c.buffer, start: c.start, offset: c.offset, duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null }; });
     st.takes = (s.takes || []).map(function (k) { return Object.assign({}, k); });
+    st.markers = (s.markers || []).map(cloneP);
+    st.selSet = [];
     st.selClip = selId ? findClip(selId) : null;
     if (st.selTrack && !trackById(st.selTrack)) st.selTrack = null;
     if (st.armedId && !trackById(st.armedId)) st.armedId = null;
@@ -4073,7 +5446,11 @@ select.ie-in{width:auto}
     u.redoBtn.setAttribute('aria-label', u.redoBtn.title);
   }
   // Après une modification : redessine, relance la lecture si elle est en cours, enregistre l'état
-  function edited(label) { renderAll(); reloadPlayback(); if (label) pushHistory(label); }
+  function edited(label) {
+    st.tracks.forEach(function (t) { autoXfade(t.id); });
+    st.markers.sort(function (a, b) { return a.t - b.t; });
+    renderAll(); reloadPlayback(); if (label) pushHistory(label);
+  }
 
   // ---------- Transport ----------
   function loopRange() {
@@ -4086,6 +5463,8 @@ select.ie-in{width:auto}
   }
   function startTimer() { if (!st.timer) st.timer = setInterval(tick, 25); }
   function stopTimerIfIdle() { if (!st.playing && st.timer) { clearInterval(st.timer); st.timer = null; } }
+  // Boucle active : en lecture, ou pendant une « boucle d'enregistrement » (une prise par passage)
+  function loopActive() { return st.loop && (!st.recording || !!(rx.take && rx.take.loopRec)); }
   function play() {
     if (st.playing || st.resuming || st.recording) return;
     var c = getCtx();
@@ -4111,20 +5490,25 @@ select.ie-in{width:auto}
     var c = getCtx();
     var P = st.playhead, L = loopRange(), rec = st.recording;
     stopPreview(); kick();
-    if (st.loop && !rec && (P < L.a || P >= L.b)) P = L.a;
+    if (fixedC0 != null && rx.wantMedia && rx.media && rx.media.P === P) { rx.wantMedia = false; startMediaInstru(P, fixedC0); return; }
+    rx.wantMedia = false;
+    var lp = loopActive();
+    if (lp && (P < L.a || P >= L.b)) P = L.a;
     var C0 = fixedC0 != null ? fixedC0 : c.currentTime + 0.03;
-    st.graph = buildGraph(c, c.destination, true);
+    st.graph = buildGraph(c, c.destination, true, { P: P, C0: C0 });
     st.transport = { P0: P, C0: C0 };
-    startSources(st.graph, P, C0, st.loop && !rec ? L.b : null);
+    startSources(st.graph, P, C0, lp ? L.b : null);
     st.metroNext = nextBeatFrom(P);
     st.playing = true;
     startTimer();
     renderTransport();
   }
   function stopGraph() {
+    if (autoRecFinish()) pushHistory('Automation');
     var g = st.graph;
     if (!g) return;
     st.graph = null;
+    if (g.media) { try { g.media.pause(); } catch (e) { /* lecteur déjà arrêté */ } }
     g.sources.slice().forEach(function (s) { try { s.stop(); } catch (e) { /* non démarré */ } });
     g.all.forEach(function (n) { try { n.disconnect(); } catch (e) { /* ignore */ } });
   }
@@ -4132,6 +5516,7 @@ select.ie-in{width:auto}
     if (!st.playing) return;
     var pos = currentPos();
     stopGraph();
+    autoReset();
     st.playing = false;
     st.playhead = pos;
     stopTimerIfIdle();
@@ -4144,6 +5529,7 @@ select.ie-in{width:auto}
     if (st.playing) {
       var p0 = st.transport.P0;
       stopGraph();
+      autoReset();
       st.playing = false;
       st.playhead = p0;
     }
@@ -4175,6 +5561,11 @@ select.ie-in{width:auto}
     var g = st.graph;
     if (!g) return;
     st.transport = { P0: L.a, C0: C0 };
+    if (rx.take && rx.take.loopRec) rx.take.cuts.push(Math.round((C0 - rx.at) * rx.take.sr)); // début de la passe suivante
+    st.tracks.forEach(function (t) {
+      if (driving(t, 'vol') && g.trackGain[t.id]) scheduleAuto(g.trackGain[t.id].gain, t.auto.vol, L.a, C0, volConv);
+      if (driving(t, 'pan') && g.trackPan[t.id]) scheduleAuto(g.trackPan[t.id].pan, t.auto.pan, L.a, C0, panConv);
+    });
     startSources(g, L.a, C0, L.b);
     st.metroNext = nextBeatFrom(L.a);
   }
@@ -4191,9 +5582,11 @@ select.ie-in{width:auto}
   function tick() {
     if (!st.playing || !st.graph) return;
     var c = getCtx(), now = c.currentTime, P0 = st.transport.P0, C0 = st.transport.C0;
-    var b = beatLen(), L = loopRange(), looping = st.loop && !st.recording;
-    var lim = looping ? L.b : Infinity;
-    if (st.metro) {
+    var b = beatLen(), L = loopRange(), looping = loopActive();
+    var lim = looping ? L.b : Infinity, pos = currentPos();
+    autoRecTick(pos);
+    if (rx.take && rx.take.punch && pos >= rx.take.punch.b + rx.take.punch.post) { stopRecording(); return; }
+    if (st.metro && !st.graph.media) { // en stratégie D, le métronome est déjà dans le rendu du lecteur
       while (st.metroNext < lim) {
         var when = C0 + (st.metroNext - P0);
         if (when > now + 0.12) break;
@@ -4270,13 +5663,52 @@ select.ie-in{width:auto}
     setStatus('Micro indisponible (voir le message).', true);
     renderBooth();
   }
-  function micConstraints(simple) {
+  // Casque « micro iPhone » (btmix) : traitement voix jamais forcé (sinon iOS bascule en mode appel)
+  function voiceOn() { return !!st.mic.voice && st.booth.hp !== 'btmix'; }
+  function micConstraints(simple, dev) {
     if (simple) return { audio: true };
-    var a = { echoCancellation: !!st.mic.voice, noiseSuppression: !!st.mic.voice, autoGainControl: !!st.mic.voice };
-    if (st.mic.dev) a.deviceId = { exact: st.mic.dev };
+    var v = voiceOn();
+    var a = { echoCancellation: v, noiseSuppression: v, autoGainControl: v };
+    if (dev) a.deviceId = { exact: dev };
     return { audio: a };
   }
-  function micKey() { return st.mic.dev + '|' + (st.mic.voice ? 'v' : 'r'); }
+  // Entrée automatique selon le casque : « btmix » -> micro intégré ; « bt » seul -> micro Bluetooth
+  function autoKind() {
+    if (st.mic.dev) return null;
+    if (st.booth.hp === 'btmix') return 'builtin';
+    if (st.booth.hp === 'bt') return 'bt';
+    return null;
+  }
+  function pickDev(kind) {
+    var list = rx.devs || [], i, d;
+    for (i = 0; i < list.length; i++) {
+      d = list[i];
+      if (kind === 'bt' && BT_RE.test(d.label)) return d.deviceId;
+      if (kind === 'builtin' && !BT_RE.test(d.label) && /iphone|built-in|intégré|integre|microphone/i.test(d.label)) return d.deviceId;
+    }
+    return '';
+  }
+  function micDevNow() {
+    var kind = autoKind();
+    return st.mic.dev || (kind ? pickDev(kind) : '');
+  }
+  function micKey(route, dev) { return dev + '|' + (st.mic.voice ? 'v' : 'r') + '|' + route; }
+  // Route de session : appelée juste avant (pre) ou juste après (post) getUserMedia, dans le geste utilisateur
+  function sessionSet(v) {
+    try { var s = navigator.audioSession; if (s && 'type' in s) s.type = v; } catch (e) { /* API absente ou refusée */ }
+  }
+  function routePre(r) {
+    if (r === 'B' || r === 'C') sessionSet('auto');
+    else sessionSet('play-and-record');
+  }
+  function routePost(r) { if (r === 'B') sessionSet('play-and-record'); }
+  function routeOf() {
+    if (st.mic.route !== 'auto') return st.mic.route;
+    var ok = null;
+    try { ok = window.localStorage.getItem(ROUTE_KEY); } catch (e) { /* stockage indisponible */ }
+    return ROUTES[ok] ? ok : 'A';
+  }
+  function saveRouteOk(r) { try { window.localStorage.setItem(ROUTE_KEY, r); } catch (e) { /* stockage indisponible */ } }
   function disc(n) { if (n) { try { n.disconnect(); } catch (e) { /* déjà déconnecté */ } } }
 
   // Ferme le micro. Appelé aussi quand les réglages d'entrée changent.
@@ -4287,20 +5719,40 @@ select.ie-in{width:auto}
     rx.node = null; rx.sp = null; rx.nodeMode = '';
   }
   // IMPORTANT : getUserMedia est appelé de façon synchrone (même geste que ctx.resume(), exigence iOS)
-  function openMic() {
-    var key = micKey();
+  // forceRoute : stratégie de routage imposée (test guidé) ; sinon celle du réglage
+  function openMic(forceRoute) {
+    var route = forceRoute || routeOf();
     kick();
+    var dev = micDevNow();
+    if (!dev && autoKind() && !rx.labels && navigator.mediaDevices) {
+      // Premier usage : sans autorisation, iOS ne donne pas les libellés des entrées
+      closeMic();
+      return navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+        s.getTracks().forEach(function (t) { t.stop(); });
+        rx.labels = true;
+        return loadDevs();
+      }).then(function () { return openMic(route); });
+    }
+    var key = micKey(route, dev);
     if (rx.stream && rx.key === key) return Promise.resolve(rx.stream);
     closeMic();
     var md = navigator.mediaDevices;
-    return md.getUserMedia(micConstraints(false)).catch(function (err) {
+    rx.openRoute = route;
+    routePre(route); // juste avant getUserMedia : exigence iOS (même geste que ctx.resume())
+    return md.getUserMedia(micConstraints(false, dev)).catch(function (err) {
       if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) throw err;
       return md.getUserMedia(micConstraints(true)).then(function (s) {
-        if (st.mic.dev) setStatus('Entrée choisie indisponible : micro par défaut utilisé.', true);
+        if (dev || st.mic.dev) setStatus('Entrée choisie indisponible : micro par défaut utilisé.', true);
         return s;
       });
     }).then(function (stream) {
       var c = getCtx();
+      routePost(route);
+      // Micro réellement utilisé : libellé et identifiant (vert si c'est celui demandé)
+      var tr = stream.getAudioTracks()[0], set = (tr && tr.getSettings) ? tr.getSettings() : {};
+      rx.micName = (tr && tr.label) || 'micro (nom masqué par Safari)';
+      rx.micState = dev ? (set.deviceId === dev ? 'ok' : 'warn') : (autoKind() ? 'warn' : '');
+      if (tr && tr.label) rx.labels = true; // libellés disponibles : pas de premier essai nécessaire
       rx.stream = stream; rx.key = key; st.booth.micErr = false;
       rx.src = c.createMediaStreamSource(stream);
       rx.an = c.createAnalyser(); rx.an.fftSize = 2048; rx.buf = new Float32Array(2048);
@@ -4315,11 +5767,22 @@ select.ie-in{width:auto}
       return stream;
     });
   }
+  // Liste des entrées audio (rx.devs) ; les libellés ne sont fournis qu'après une autorisation
+  function loadDevs() {
+    var md = navigator.mediaDevices;
+    if (!md || !md.enumerateDevices) return Promise.resolve([]);
+    return md.enumerateDevices().then(function (list) {
+      rx.devs = list.filter(function (d) { return d.kind === 'audioinput'; })
+        .map(function (d) { return { deviceId: d.deviceId, label: d.label || '' }; });
+      return rx.devs;
+    }).catch(function () { rx.devs = []; return []; });
+  }
   function refreshDevices() {
     var md = navigator.mediaDevices;
-    if (!md || !md.enumerateDevices || !st.ui.sh) return;
-    md.enumerateDevices().then(function (list) {
-      var sel = st.ui.sh.dev, ins = list.filter(function (d) { return d.kind === 'audioinput'; });
+    if (!md || !md.enumerateDevices) return;
+    loadDevs().then(function () {
+      if (!st.ui.sh) return;
+      var list = rx.devs, sel = st.ui.sh.dev, ins = list;
       sel.innerHTML = '';
       var o0 = el('option', null, 'Par défaut du système'); o0.value = '';
       sel.appendChild(o0);
@@ -4401,12 +5864,21 @@ select.ie-in{width:auto}
     rx.abort = false;
     st.recPending = true;
     setStatus('Ouverture du micro…');
+    // Stratégie D : l'instru passe par un lecteur média, rendu hors ligne avant la prise (prises simples seulement)
+    var mode = st.recMode, route = routeOf();
+    rx.wantMedia = ROUTES[route].media && !st.playing && !(mode && (mode.kind === 'punch' || mode.kind === 'loop')) && !mixHasAuto();
+    if (rx.wantMedia) unlockMedia();
     var p;
-    try { p = openMic(); }
-    catch (err) { st.recPending = false; showMicError(err); return; }
+    try { p = openMic(route); }
+    catch (err) { st.recPending = false; rx.wantMedia = false; showMicError(err); return; }
     p.then(function () {
       if (rx.abort) { st.recPending = false; return null; }
       return ensureCapture(c).then(function () { return c.resume(); }).then(function () {
+        if (rx.wantMedia) return prepMediaInstru(st.playhead, armed).catch(function (err) {
+          rx.wantMedia = false; rx.media = null;
+          setStatus('Lecteur média indisponible (' + ((err && err.message) || err) + ') : instru jouée par Web Audio.', true);
+        });
+      }).then(function () {
         st.recPending = false;
         if (rx.abort) return;
         beginTake(c, armed);
@@ -4421,7 +5893,8 @@ select.ie-in{width:auto}
     var P = st.playing ? currentPos() : st.playhead;
     var t = armed ? trackById(armed) : null, created = false;
     if (!t) { t = addTrack('Voix'); st.armedId = t.id; created = true; }
-    var cd = st.mic.countIn, b = beatLen(), C0 = c.currentTime + 0.05 + cd * b;
+    var mode = st.recMode, cd = mode ? 0 : st.mic.countIn, b = beatLen(), C0 = c.currentTime + 0.05 + cd * b;
+    st.recMode = null;
     if (rx.nodeMode === 'mr' && !startMR()) {
       if (created) dropTrack(t.id);
       renderAll();
@@ -4432,6 +5905,11 @@ select.ie-in{width:auto}
     st.recMute = t.id;
     st.playhead = P;
     rx.take = { tid: t.id, pos: P, sr: c.sampleRate, lat: st.mic.latency, created: created, startAt: C0, cd: cd, srcs: 0, instru: false };
+    if (mode && mode.kind === 'punch') rx.take.punch = { a: mode.a, b: mode.b, post: 1 };
+    if (mode && mode.kind === 'loop') {
+      rx.take.loopRec = { a: mode.a, b: mode.b }; rx.take.cuts = [];
+      rx.take.restoreLoop = !st.loop; st.loop = true;
+    }
     rx.chunks = []; rx.nSamp = 0; rx.pk = []; rx.at = C0; rx.on = true; rx.hotUntil = 0;
     if (rx.node) rx.node.port.postMessage({ type: 'start', at: C0 });
     attachCapture(true);
@@ -4461,13 +5939,94 @@ select.ie-in{width:auto}
     var c = getCtx(), blob = new Blob(mr.chunks, { type: mr.rec.mimeType || 'audio/webm' });
     blob.arrayBuffer().then(function (ab) { return c.decodeAudioData(ab); }).then(function (buf) {
       var L = buf.getChannelData(0), R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : L;
-      placeTake(take, [L, R], buf.sampleRate);
+      var lat0 = Math.round((take.lat || 0) * buf.sampleRate / 1000);
+      placeTake(take, [L.subarray(lat0), R.subarray(lat0)], buf.sampleRate, {});
     }).catch(function (err) {
       if (take.created) dropTrack(take.tid);
       renderAll();
       setStatus('Décodage de la prise impossible : ' + ((err && err.message) || err), true);
     });
   }
+  // ---------- Stratégie D : instru jouée par un élément audio (rendu hors ligne d'un WAV) ----------
+  // Le WAV contient toutes les pistes sauf la piste enregistrée, plus le métronome (si actif), de la position P à la fin.
+  function mixHasAuto() {
+    return st.tracks.some(function (t) { return driving(t, 'vol') || driving(t, 'pan'); });
+  }
+  function mediaEl() {
+    if (!rx.el) { rx.el = new Audio(); rx.el.preload = 'auto'; rx.el.setAttribute('playsinline', ''); }
+    return rx.el;
+  }
+  // Appelé dans le geste utilisateur : débloque l'élément (son silencieux de 0,1 s)
+  function unlockMedia() {
+    try {
+      var a = mediaEl(), p;
+      if (!rx.silentUrl) rx.silentUrl = wavUrl(monoSilence());
+      a.src = rx.silentUrl;
+      p = a.play();
+      if (p && p.catch) p.catch(noop);
+    } catch (e) { /* lecteur indisponible */ }
+  }
+  function monoSilence() {
+    var n = 800;
+    return { numberOfChannels: 1, sampleRate: 8000, length: n, getChannelData: function () { return new Float32Array(n); } };
+  }
+  function wavUrl(buf) {
+    return URL.createObjectURL(encodeWav(buf, 16));
+  }
+  function revokeMedia() {
+    if (rx.media && rx.media.url) { try { URL.revokeObjectURL(rx.media.url); } catch (e) { /* ignore */ } }
+    rx.media = null;
+  }
+  function prepMediaInstru(P, armedId) {
+    var c = getCtx(), sr = c.sampleRate, end = projectEnd(), len = Math.max(0, end - P);
+    revokeMedia();
+    if (len <= 0) return Promise.reject(new Error('rien à jouer après la tête de lecture'));
+    var off = new OfflineAudioContext(2, Math.ceil((len + exportTail()) * sr), sr);
+    var prevMute = st.recMute;
+    st.recMute = armedId || null;
+    var g;
+    try { g = buildGraph(off, off.destination, false, { P: P, C0: 0 }); startSources(g, P, 0, null); }
+    finally { st.recMute = prevMute; }
+    if (st.metro) {
+      var b = beatLen(), t = nextBeatFrom(P);
+      for (; t - P <= len; t += b) scheduleClick(off, t - P, (Math.round(t / b) % 4) === 0);
+    }
+    return off.startRendering().then(function (buf) {
+      rx.media = { url: wavUrl(buf), P: P };
+      return rx.media;
+    });
+  }
+  // Démarre l'instru par l'élément audio à C0 (contexte) ; la capture part au même C0
+  function startMediaInstru(P, C0) {
+    var c = getCtx(), a = mediaEl(), m = rx.media;
+    st.graph = { c: c, sources: [], all: [], media: a, trackGain: {}, trackGate: {}, trackPan: {}, autoV: {}, autoP: {} };
+    st.transport = { P0: P, C0: C0 };
+    st.metroNext = nextBeatFrom(P);
+    st.playing = true;
+    startTimer();
+    renderTransport();
+    try { a.pause(); } catch (e) { /* ignore */ }
+    a.src = m.url;
+    a.currentTime = 0;
+    var delay = Math.max(0, (C0 - c.currentTime) * 1000);
+    setTimeout(function () {
+      if (!st.graph || st.graph.media !== a) return;
+      var p = a.play();
+      if (p && p.catch) p.catch(function () { setStatus('Safari a bloqué la lecture de l’instru : essaie une autre stratégie de routage.', true); });
+    }, delay);
+  }
+  // Joue un WAV court (test guidé) ; resolve quand le son est lancé
+  function playMediaUrl(url) {
+    var a = mediaEl();
+    try { a.pause(); } catch (e) { /* ignore */ }
+    a.src = url; a.currentTime = 0;
+    var p = a.play();
+    return p && p.then ? p : Promise.resolve();
+  }
+  function stopMediaTest() {
+    if (rx.el) { try { rx.el.pause(); } catch (e) { /* ignore */ } }
+  }
+
   // Arrêt : capture arrêtée, lecture arrêtée, la tête de lecture reste à la fin de la prise
   function stopRecording() {
     if (!st.recording) return;
@@ -4493,12 +6052,39 @@ select.ie-in{width:auto}
     rx.take = null; rx.chunks = []; rx.nSamp = 0; rx.pk = [];
     if (!take) return;
     for (i = 0; i < chunks.length; i++) { all.set(chunks[i], o); o += chunks[i].length; }
-    placeTake(take, [all], take.sr);
+    var sr = take.sr, lat = Math.round((take.lat || 0) * sr / 1000);
+    if (take.restoreLoop) st.loop = false;
+    if (take.punch) {
+      // Punch : on ne garde que la zone [a, b] ; le pré-roll et le post-roll ne sont pas conservés
+      var s0 = clamp(Math.round((take.punch.a - take.pos) * sr) + lat, 0, n), s1 = clamp(Math.round((take.punch.b - take.pos) * sr) + lat, s0, n);
+      take.pos = take.punch.a;
+      placeTake(take, [all.subarray(s0, s1)], sr, {});
+      return;
+    }
+    if (take.loopRec) { finishLoopTakes(take, all, n, lat, sr); return; }
+    placeTake(take, [all.subarray(Math.min(lat, n))], sr, {});
   }
-  // Compensation : les premières « lat » ms de la capture sont retirées, la prise est placée à la tête de départ
-  function placeTake(take, chans, sr) {
-    var c = getCtx(), lat = Math.round((take.lat || 0) * sr / 1000);
-    var len = chans[0].length, skip = Math.min(lat, len), n = len - skip;
+  // Boucle d'enregistrement : une prise par passage complète (les passes incomplètes sont écartées)
+  function finishLoopTakes(take, all, n, lat, sr) {
+    var cuts = [0].concat(take.cuts || [], [n]), segLen = Math.round((take.loopRec.b - take.loopRec.a) * sr), made = 0, k;
+    for (k = 0; k + 1 < cuts.length; k++) {
+      var s0 = clamp(cuts[k] + lat, 0, n), s1 = clamp(cuts[k + 1] + lat, 0, n);
+      if (s1 - s0 < segLen * 0.9) continue;
+      var copy = Object.assign({}, take, { pos: take.loopRec.a });
+      placeTake(copy, [all.subarray(s0, Math.min(n, s0 + segLen))], sr, { noHist: true });
+      made++;
+    }
+    if (made) {
+      var label = 'Enregistrement en boucle : ' + made + ' prise' + (made > 1 ? 's' : '');
+      pushHistory(label);
+      if (rx.lastTake) rx.lastTake.label = label;
+      setStatus(label + ' ajoutée(s).');
+    } else setStatus('Aucune passe complète enregistrée : rien n’a été ajouté.', true);
+  }
+  // Place une prise (échantillons déjà recadrés) sur la piste ; opt.noHist : pas d'entrée d'historique
+  function placeTake(take, chans, sr, opt) {
+    opt = opt || {};
+    var c = getCtx(), n = chans[0].length;
     var t = trackById(take.tid);
     if (n < sr * 0.05) {
       if (take.created && t) dropTrack(t.id);
@@ -4508,8 +6094,8 @@ select.ie-in{width:auto}
     }
     if (!t) t = addTrack('Voix');
     var buf = c.createBuffer(2, n, sr), L = buf.getChannelData(0), R = buf.getChannelData(1);
-    L.set(chans[0].subarray(skip, skip + n));
-    R.set(chans[chans.length > 1 ? 1 : 0].subarray(skip, skip + n));
+    L.set(chans[0]);
+    R.set(chans[chans.length > 1 ? 1 : 0]);
     st.takeSeq += 1;
     var name = 'Prise ' + st.takeSeq;
     // Chaque prise est conservée ; sur la même zone, la précédente passe en réserve (non jouée)
@@ -4520,9 +6106,9 @@ select.ie-in{width:auto}
     st.booth.lastId = tk.id;
     rx.lastTake = { clipId: clip.id, label: name, duration: clip.duration, instru: take.instru, srcs: take.srcs, lat: take.lat };
     renderAll();
-    pushHistory(name);
+    if (!opt.noHist) pushHistory(name);
     saveNow();
-    setStatus(name + ' ajoutée à « ' + t.name + ' » : ' + clip.duration.toFixed(3) + ' s, latence compensée de ' + take.lat + ' ms.');
+    if (!opt.noHist) setStatus(name + ' ajoutée à « ' + t.name + ' » : ' + clip.duration.toFixed(3) + ' s, latence compensée de ' + take.lat + ' ms.');
   }
   function dropTrack(tid) {
     st.clips = st.clips.filter(function (c) { return c.trackId !== tid; });
@@ -4682,6 +6268,7 @@ select.ie-in{width:auto}
     if (!s) return;
     s.voice.classList.toggle('on', st.mic.voice);
     s.voice.setAttribute('aria-pressed', st.mic.voice ? 'true' : 'false');
+    s.route.value = st.mic.route;
     s.test.classList.toggle('on', rx.testing);
     s.test.querySelector('.as-bl').textContent = rx.testing ? 'Arrêter le test' : 'Tester le micro';
     s.lat.value = st.mic.latency;
@@ -4775,7 +6362,8 @@ select.ie-in{width:auto}
       color: TRACK_COLORS[n % TRACK_COLORS.length],
       muted: false, solo: false, db: 0, pan: 0,
       inserts: [null, null, null, null],
-      sends: isAux ? [] : [{ dest: null, db: 0, pre: false }, { dest: null, db: 0, pre: false }]
+      sends: isAux ? [] : [{ dest: null, db: 0, pre: false }, { dest: null, db: 0, pre: false }],
+      auto: { mode: 'off', show: false, param: 'vol', vol: [], pan: [] }
     };
     st.tracks.push(t);
     st.selTrack = t.id;
@@ -4846,9 +6434,10 @@ select.ie-in{width:auto}
   }
   // Les fondus ne peuvent pas dépasser la moitié du clip (entrée et sortie ne se chevauchent pas)
   function clampFades(c) {
-    var h = c.duration / 2;
-    c.fadeIn = clamp(c.fadeIn || 0, 0, h);
-    c.fadeOut = clamp(c.fadeOut || 0, 0, h);
+    var d = c.duration;
+    c.fadeIn = clamp(c.fadeIn || 0, 0, d);
+    c.fadeOut = clamp(c.fadeOut || 0, 0, d);
+    if (c.fadeIn + c.fadeOut > d) c.fadeOut = Math.max(0, d - c.fadeIn);
   }
   function setClipGain(c, db) {
     c.gainDb = clamp(Math.round(db * 10) / 10, GAIN_MIN, GAIN_MAX);
@@ -4914,14 +6503,116 @@ select.ie-in{width:auto}
     setStatus('');
     edited('Séparer le clip');
   }
+  // Clips sélectionnés (Maj+clic pour en ajouter) ; à défaut, le clip sélectionné seul
+  function selGroup() {
+    var g = (st.selSet || []).filter(function (c) { return st.clips.indexOf(c) >= 0; });
+    if (!g.length && st.selClip && st.clips.indexOf(st.selClip) >= 0) g = [st.selClip];
+    return g;
+  }
   function deleteSelected() {
-    var c = st.selClip;
-    if (!c) { setStatus('Aucun clip sélectionné.', true); return; }
-    if (st.mode === 'shuffle') rippleClose(c.trackId, c.start, c.start + c.duration, c);
-    st.clips = st.clips.filter(function (x) { return x !== c; });
-    st.selClip = null;
+    var g = selGroup();
+    if (!g.length) { setStatus('Aucun clip sélectionné.', true); return; }
+    g.forEach(function (c) {
+      if (st.mode === 'shuffle') rippleClose(c.trackId, c.start, c.start + c.duration, c);
+    });
+    st.clips = st.clips.filter(function (x) { return g.indexOf(x) < 0; });
+    st.selClip = null; st.selSet = [];
     setStatus('');
-    edited('Supprimer le clip');
+    edited(g.length > 1 ? 'Supprimer ' + g.length + ' clips' : 'Supprimer le clip');
+  }
+  // Presse-papiers : positions relatives au premier clip copié
+  function clipItem(c, t0) {
+    return { trackId: c.trackId, dt: c.start - t0, name: c.name, buffer: c.buffer, offset: c.offset, duration: c.duration,
+      fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve };
+  }
+  function copySel() {
+    var g = selGroup();
+    if (!g.length) { setStatus('Sélectionnez un ou plusieurs clips à copier.', true); return false; }
+    var t0 = Math.min.apply(null, g.map(function (c) { return c.start; }));
+    st.clipboard = g.map(function (c) { return clipItem(c, t0); });
+    setStatus(g.length + ' clip(s) copié(s) (Ctrl+V pour coller à la tête de lecture).');
+    return true;
+  }
+  function cutSel() {
+    if (!copySel()) return;
+    var g = selGroup();
+    st.clips = st.clips.filter(function (c) { return g.indexOf(c) < 0; });
+    st.selSet = []; st.selClip = null;
+    edited('Couper ' + g.length + ' clip(s)');
+    setStatus(g.length + ' clip(s) coupé(s) : Ctrl+V pour les coller.');
+  }
+  // Pose des copies à « at » : tid fixe (coller sur la piste sélectionnée) ou piste d'origine (dupliquer)
+  function placeItems(items, tid, at, label) {
+    var news = [];
+    items.forEach(function (it) {
+      var tt = trackById(tid != null ? tid : it.trackId);
+      if (!tt || tt.type === 'aux') return;
+      var clip = { id: uid('c'), trackId: tt.id, name: it.name, buffer: it.buffer, start: Math.max(0, at + it.dt),
+        offset: it.offset, duration: it.duration, fadeIn: it.fadeIn, fadeOut: it.fadeOut, gainDb: it.gainDb, curve: it.curve, takeId: null };
+      st.clips.push(clip); news.push(clip);
+    });
+    if (!news.length) { setStatus('Aucune piste de destination valide pour ces clips.', true); return; }
+    st.selSet = news; st.selClip = news[0]; st.selTrack = news[0].trackId;
+    if (st.mode === 'shuffle') news.forEach(function (c) { resolveShuffle(c.trackId); });
+    edited(label);
+  }
+  function pasteClip() {
+    if (!st.clipboard || !st.clipboard.length) { setStatus('Presse-papiers vide : copiez d’abord un clip (Ctrl+C).', true); return; }
+    var sel = st.selTrack ? trackById(st.selTrack) : null;
+    placeItems(st.clipboard, sel && sel.type !== 'aux' ? sel.id : null, currentPos(), 'Coller ' + st.clipboard.length + ' clip(s)');
+  }
+  function dupClip() {
+    var g = selGroup();
+    if (!g.length) { setStatus('Sélectionnez un ou plusieurs clips à dupliquer.', true); return; }
+    var t0 = Math.min.apply(null, g.map(function (c) { return c.start; })), end = 0;
+    g.forEach(function (c) { end = Math.max(end, c.start + c.duration); });
+    placeItems(g.map(function (c) { return clipItem(c, t0); }), null, end, 'Dupliquer ' + g.length + ' clip(s)');
+  }
+  // Paires de clips qui se chevauchent sur une piste (consécutifs dans l'ordre de départ)
+  function overlapsOf(tid) {
+    var list = clipsOf(tid).sort(function (a, b) { return a.start - b.start; }), out = [], i, a, b, ov;
+    for (i = 0; i + 1 < list.length; i++) {
+      a = list[i]; b = list[i + 1];
+      ov = a.start + a.duration - b.start;
+      if (ov > 1e-4) out.push({ a: a, b: b, s: b.start, d: ov });
+    }
+    return out;
+  }
+  // Chevauchement sans fondu : crée un fondu enchaîné à puissance constante sur la zone commune
+  function autoXfade(tid) {
+    overlapsOf(tid).forEach(function (o) {
+      if (o.a.fadeOut > 0 || o.b.fadeIn > 0) return;
+      o.a.fadeOut = o.d; o.b.fadeIn = o.d; o.a.curve = 'eqp'; o.b.curve = 'eqp';
+      clampFades(o.a); clampFades(o.b);
+    });
+  }
+  // Fondu enchaîné entre deux clips sélectionnés (adjacents ou chevauchants) : allonge le premier ou avance le second
+  function xfadeSel() {
+    var g = selGroup();
+    if (g.length !== 2 || g[0].trackId !== g[1].trackId) { setStatus('Sélectionnez deux clips adjacents d’une même piste (Maj+clic).', true); return; }
+    var a = g[0], b = g[1], tmp;
+    if (a.start > b.start) { tmp = a; a = b; b = tmp; }
+    var ov = a.start + a.duration - b.start, want = Math.min(XF_LEN, a.duration / 2, b.duration / 2);
+    if (ov < want) {
+      var need = want - ov;
+      if (a.offset + a.duration + need <= a.buffer.duration + 1e-6) a.duration += need;
+      else if (b.offset >= need - 1e-6 && b.start - need >= 0) { b.start -= need; b.offset -= need; b.duration += need; }
+      else { setStatus('Pas assez de son pour créer le fondu.', true); return; }
+    }
+    ov = a.start + a.duration - b.start;
+    a.fadeOut = ov; b.fadeIn = ov; a.curve = 'eqp'; b.curve = 'eqp';
+    clampFades(a); clampFades(b);
+    st.selSet = [a, b]; st.selClip = b;
+    edited('Fondu enchaîné');
+    setStatus('Fondu enchaîné de ' + ov.toFixed(2) + ' s créé.');
+  }
+  // Maj+clic : ajoute ou retire le clip de la sélection
+  function toggleSelClip(clip) {
+    var list = st.selSet || [], i = list.indexOf(clip);
+    if (i >= 0) list.splice(i, 1); else list.push(clip);
+    st.selSet = list;
+    st.selClip = clip; st.selTrack = clip.trackId;
+    updateSelClasses();
   }
   function toggleFade(prop) {
     var c = st.selClip;
@@ -5115,7 +6806,9 @@ select.ie-in{width:auto}
   }
   function clipDown(e, elc, clip) {
     if (e.button !== 0) return;
+    if (e.shiftKey) { e.stopPropagation(); toggleSelClip(clip); return; }
     st.selClip = clip;
+    st.selSet = [clip];
     st.selTrack = clip.trackId;
     updateSelClasses();
     if (st.tool === 'select') return; // remonte vers la piste : sélection temporelle
@@ -5203,7 +6896,10 @@ select.ie-in{width:auto}
   }
   function updateSelClasses() {
     if (!st.root) return;
-    st.root.querySelectorAll('.as-clip').forEach(function (c) { c.classList.toggle('as-sel', c._clip === st.selClip); });
+    st.root.querySelectorAll('.as-clip').forEach(function (c) {
+      c.classList.toggle('as-sel', c._clip === st.selClip);
+      c.classList.toggle('as-msel', c._clip !== st.selClip && (st.selSet || []).indexOf(c._clip) >= 0);
+    });
     st.root.querySelectorAll('.as-hdr').forEach(function (h) { h.classList.toggle('as-sel-track', h._tid === st.selTrack); });
   }
 
@@ -5240,7 +6936,8 @@ select.ie-in{width:auto}
     elc.style.background = 'linear-gradient(180deg,' + hexA(color, 0.95) + ',' + hexA(color, 0.55) + ')';
     elc._clip = clip;
     elc.innerHTML = '';
-    elc.appendChild(clipCanvas(clip, W, CLIP_H));
+    elc._W = W; elc._span = visibleSpan(clip, W);
+    elc.appendChild(clipCanvas(clip, W, CLIP_H, elc._span));
     elc.appendChild(el('span', 'as-clip-name', clip.name));
     if (clip.gainDb) elc.appendChild(el('span', 'as-clip-gain', dbText(clip.gainDb)));
     var hl = el('div', 'as-fh as-fh-l');
@@ -5300,6 +6997,9 @@ select.ie-in{width:auto}
         renderAll();
       }));
     }
+    if (!isAux) btns.appendChild(chip('A', 'Automation : afficher ou masquer la voie sous la piste', autoOf(t).show, 'as-au', function () {
+      var a = autoOf(t); a.show = !a.show; renderAll();
+    }));
     var hm = meterEl('as-meter-s');
     st.ui.hMeters[t.id] = hm._mask;
     h.appendChild(top); h.appendChild(btns); h.appendChild(hm);
@@ -5325,6 +7025,7 @@ select.ie-in{width:auto}
     } else {
       lane.style.backgroundSize = (beatLen() * st.pxPerSec) + 'px 100%';
       clipsOf(t.id).forEach(function (clip) { lane.appendChild(buildClip(clip)); });
+      drawOverlaps(lane, t.id);
     }
     lane.addEventListener('pointerdown', laneDown);
     row.appendChild(lane);
@@ -5349,8 +7050,13 @@ select.ie-in{width:auto}
     row.appendChild(ruler);
     inner.appendChild(row);
     st.ui.ruler = ruler;
+    buildMarkerRow(inner, H, pps, end);
     if (!st.tracks.length) inner.appendChild(el('div', 'as-empty', 'Aucune piste. Importez un fichier audio ou créez une piste.'));
-    st.tracks.forEach(function (t) { inner.appendChild(buildTrackRow(t, end)); });
+    st.tracks.forEach(function (t) {
+      inner.appendChild(buildTrackRow(t, end));
+      if (t.type !== 'aux' && autoOf(t).show) inner.appendChild(buildAutoRow(t, end));
+    });
+    renderMarkerList();
     updateSelOverlay();
     var ph = el('div', 'as-playhead');
     inner.appendChild(ph);
@@ -5466,18 +7172,18 @@ select.ie-in{width:auto}
       k.style.setProperty('--rot', (t.pan * 1.35).toFixed(1) + 'deg');
       k.setAttribute('aria-valuenow', String(t.pan));
       lab.textContent = panText(t.pan);
-      var g = st.graph;
-      if (g && g.trackPan[t.id]) g.trackPan[t.id].pan.value = t.pan / 100;
+      if (st.graph) applyMixLive();
     }
     var p0 = 0;
     k.addEventListener('pointerdown', function (e) {
       if (e.button !== 0) return;
       e.preventDefault(); e.stopPropagation();
       p0 = t.pan;
+      touchStart(t, 'pan');
       startDrag(e, function (dx, dy) {
         t.pan = clamp(Math.round(p0 + (dx - dy) * 0.9), -100, 100);
         paint();
-      }, function () { pushHistory('Panoramique « ' + t.name + ' »'); });
+      }, function () { touchEnd(t, 'pan'); pushHistory('Panoramique « ' + t.name + ' »'); });
     });
     k.addEventListener('wheel', function (e) {
       e.preventDefault();
@@ -5519,6 +7225,7 @@ select.ie-in{width:auto}
       dbl.textContent = dbText(t.db);
       applyMixLive();
     });
+    touchHooks(fader, t, 'vol');
     fader.addEventListener('change', function () { pushHistory('Volume « ' + t.name + ' »'); });
     s.appendChild(dbl);
     var ms = el('div', 'as-ms');
@@ -5597,19 +7304,27 @@ select.ie-in{width:auto}
     renderParams();
   }
   // Applique volume/pan/mute/solo au graphe en cours de lecture (en direct)
+  // Applique volume, pan, mute et solo au graphe en cours de lecture (en direct)
   function applyMixLive() {
     var g = st.graph;
     if (!g) return;
     var now = g.c.currentTime;
     st.tracks.forEach(function (t) {
-      var v = trackGainValue(t);
-      if (g.trackGain[t.id]) g.trackGain[t.id].gain.setTargetAtTime(v, now, 0.01);
-      if (g.trackGate[t.id]) g.trackGate[t.id].gain.setTargetAtTime(v > 0 ? 1 : 0, now, 0.01);
-      if (g.trackPan[t.id]) g.trackPan[t.id].pan.setTargetAtTime(t.pan / 100, now, 0.01);
+      var v = trackGainValue(t), tg = g.trackGain[t.id], gate = g.trackGate[t.id], pan = g.trackPan[t.id];
+      if (tg) {
+        if (driving(t, 'vol')) { /* la courbe d'automation pilote le fader */ }
+        else if (g.autoV[t.id]) { tg.gain.cancelScheduledValues(now); tg.gain.setValueAtTime(v, now); g.autoV[t.id] = false; }
+        else tg.gain.setTargetAtTime(v, now, 0.01);
+      }
+      if (gate) gate.gain.setTargetAtTime(v > 0 ? 1 : 0, now, 0.01);
+      if (pan) {
+        if (driving(t, 'pan')) { /* la courbe de pan pilote le panoramique */ }
+        else if (g.autoP[t.id]) { pan.pan.cancelScheduledValues(now); pan.pan.setValueAtTime(t.pan / 100, now); g.autoP[t.id] = false; }
+        else pan.pan.setTargetAtTime(t.pan / 100, now, 0.01);
+      }
     });
     g.mGain.gain.setTargetAtTime(dbToGain(st.masterDb), now, 0.01);
   }
-
   // ---------- Vumètres et compteur (rAF) ----------
   function peakOf(an) {
     if (!an._b) an._b = new Float32Array(an.fftSize);
@@ -5703,8 +7418,8 @@ select.ie-in{width:auto}
   }
   function renderAll() {
     if (!st.root) return;
-    renderEdit();
-    renderMixer();
+    if (st.tab === 'edit') renderEdit();
+    if (st.tab === 'mix') renderMixer();
     renderTransport();
     renderTools();
     updateTimeUI();
@@ -6006,6 +7721,25 @@ select.ie-in{width:auto}
     '.as-hp-t{font-weight:700;font-size:15px;}',
     '.as-hp-s{font-size:12px;color:var(--muted,#9d95b8);}',
     '.as-hp.on{background:linear-gradient(135deg,rgba(168,85,247,.35),rgba(168,85,247,.15));border-color:var(--accent2,#a855f7);box-shadow:0 0 0 1px var(--accent2,#a855f7),0 0 18px rgba(168,85,247,.35);}',
+    '.as-hp-mix{border-color:rgba(34,211,238,.45);}',
+    '.as-hp-ico{display:flex;gap:2px;flex:none;color:var(--accent,#22d3ee);}',
+    '.as-hp-ico .as-ico{width:20px;height:20px;}',
+    '.as-hp-badge{align-self:flex-start;font-size:10.5px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#0c0a14;background:var(--grad,#22d3ee);border-radius:999px;padding:2px 8px;margin-bottom:2px;}',
+    '.as-guide{display:flex;flex-direction:column;gap:8px;margin-top:10px;padding:12px;border-radius:var(--radius-sm,9px);background:var(--bg2,#151223);border:1px solid var(--border2,rgba(255,255,255,.16));}',
+    '.as-gmic{font-size:12.5px;font-weight:700;color:var(--muted,#9d95b8);border-radius:8px;padding:6px 9px;border:1px solid var(--border,rgba(255,255,255,.08));}',
+    '.as-gmic.ok{color:#a7f3d0;background:rgba(52,211,153,.12);border-color:rgba(52,211,153,.5);}',
+    '.as-gmic.warn{color:#fde68a;background:rgba(251,191,36,.10);border-color:rgba(251,191,36,.45);}',
+    '.as-gmsg{font-size:13px;line-height:1.45;}',
+    '.as-gmsg.as-err{color:#fda4af;}',
+    '.as-glog{display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--muted,#9d95b8);font-family:var(--mono,monospace);}',
+    '.as-glog-l{line-height:1.35;}',
+    '.as-gask,.as-ghelp{display:flex;flex-direction:column;gap:8px;}',
+    '.as-gq{font-weight:700;font-size:14px;}',
+    '.as-gopts{display:flex;flex-wrap:wrap;gap:8px;}',
+    '.as-gopts .as-cbtn{flex:1 1 auto;}',
+    '.as-micl{font-family:var(--mono,monospace);font-size:11.5px;color:var(--muted,#9d95b8);padding:4px 8px;border-radius:8px;background:rgba(255,255,255,.04);align-self:flex-start;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.as-micl.ok{color:#a7f3d0;}',
+    '.as-micl.warn{color:#fde68a;}',
     '.as-opts{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}',
     '.as-pchip{min-height:48px;padding:0 14px;border-radius:999px;background:var(--panel2,#241e38);border:1px solid var(--border,rgba(255,255,255,.08));color:var(--muted,#9d95b8);font:600 13px var(--font,system-ui,sans-serif);cursor:pointer;}',
     '.as-pchip.on{color:#fff;background:linear-gradient(135deg,rgba(168,85,247,.35),rgba(168,85,247,.15));border-color:var(--accent2,#a855f7);}',
@@ -6046,6 +7780,30 @@ select.ie-in{width:auto}
     '.as-banner-acts{display:flex;gap:6px;flex-wrap:wrap;width:100%;}',
     '.as-banner .as-btn{height:36px;}',
     '.as-btn.as-danger{color:#fecdd3;border-color:rgba(244,63,94,.6);}',
+    // Automation, fondus enchaînés, marqueurs, punch, export (v5)
+    '.as-auto-row{display:flex;border-bottom:1px solid var(--border,rgba(255,255,255,.08));background:rgba(10,8,18,.55);}',
+    '.as-auto-hd{position:sticky;left:0;z-index:3;flex:none;display:flex;flex-direction:column;justify-content:center;gap:6px;padding:6px 10px;background:var(--panel2,#241e38);border-right:1px solid var(--border,rgba(255,255,255,.08));}',
+    '.as-auto-sel{height:28px;font-size:12px;padding:0 6px;}',
+    '.as-alane{position:relative;flex:none;overflow:hidden;background-image:linear-gradient(to right,rgba(255,255,255,.06) 1px,transparent 1px);}',
+    '.as-asvg{display:block;touch-action:none;cursor:crosshair;user-select:none;-webkit-user-select:none;}',
+    '.as-abg{fill:transparent;}',
+    '.as-apoly{fill:none;stroke:var(--accent,#22d3ee);stroke-width:2;pointer-events:none;}',
+    '.as-apt{fill:#fff;stroke:var(--accent2,#a855f7);stroke-width:2;cursor:grab;touch-action:none;}',
+    '.as-au{width:26px;height:26px;}',
+    '.as-xf{position:absolute;top:6px;height:72px;pointer-events:none;z-index:2;border:1px solid rgba(255,255,255,.4);border-radius:6px;background:linear-gradient(to top right,transparent calc(50% - 1px),rgba(255,255,255,.9) 50%,transparent calc(50% + 1px)),linear-gradient(to bottom right,transparent calc(50% - 1px),rgba(255,255,255,.9) 50%,transparent calc(50% + 1px));}',
+    '.as-clip.as-msel{box-shadow:0 0 0 2px var(--accent,#22d3ee),0 0 14px rgba(34,211,238,.45);z-index:1;}',
+    '.as-mk-row{display:flex;position:sticky;top:' + RULER_H + 'px;z-index:4;height:26px;background:var(--bg2,#151223);border-bottom:1px solid var(--border,rgba(255,255,255,.08));}',
+    '.as-mk-spacer{flex:none;position:sticky;left:0;z-index:5;background:var(--panel2,#241e38);border-right:1px solid var(--border,rgba(255,255,255,.08));}',
+    '.as-mk-lane{position:relative;flex:none;height:26px;}',
+    '.as-mk{position:absolute;top:1px;height:24px;display:flex;align-items:center;gap:3px;}',
+    '.as-mk-flag{width:12px;height:20px;border-radius:3px 6px 6px 3px;background:var(--warn,#fbbf24);cursor:ew-resize;touch-action:none;box-shadow:0 0 8px rgba(251,191,36,.45);}',
+    '.as-mk-in{height:22px;width:92px;min-width:0;padding:0 6px;font-size:11px;background:rgba(12,10,20,.75);border:1px solid var(--border,rgba(255,255,255,.08));border-radius:6px;color:var(--text,#efecf8);}',
+    '.as-mklist{flex:none;margin:6px 12px 0;padding:8px 10px;max-height:180px;overflow:auto;background:var(--panel,rgba(28,24,44,.86));border:1px solid var(--border,rgba(255,255,255,.08));border-radius:var(--radius,12px);display:flex;flex-direction:column;gap:6px;}',
+    '.as-mkl{display:flex;align-items:center;gap:8px;}',
+    '.as-mkl-n{flex:1;min-width:0;height:30px;width:auto;font-size:12.5px;}',
+    '.as-mlbl2{font:12px var(--mono,ui-monospace,monospace);color:var(--muted,#9d95b8);white-space:nowrap;}',
+    '.as-exp{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px;}',
+    '@media (max-width:820px){.as-mklist{margin:6px 8px 0;}.as-auto-hd{padding:6px 6px;}.as-mk-in{width:72px;}}',
     '@media (max-width:820px){.as-booth{padding:8px 8px 26px;}.as-card{padding:12px;}.as-cd{font-size:84px;}.as-chrono{font-size:48px;}.as-tlrow{padding-left:10px;}}'
   ].join('\n');
 
@@ -6202,6 +7960,26 @@ select.ie-in{width:auto}
     ibtn(tb, 'scissors', 'Séparer', 'Séparer (B) : couper le clip sélectionné à la tête de lecture', splitSelected);
     ibtn(tb, 'trash', 'Supprimer', 'Supprimer le clip sélectionné (Suppr)', deleteSelected);
     tb.appendChild(el('div', 'as-sep'));
+    ibtn(tb, 'copy', 'Copier', 'Copier les clips sélectionnés (Ctrl+C)', copySel);
+    ibtn(tb, 'cut', 'Couper', 'Couper les clips sélectionnés (Ctrl+X)', cutSel);
+    ibtn(tb, 'paste', 'Coller', 'Coller à la tête de lecture, sur la piste sélectionnée (Ctrl+V)', pasteClip);
+    ibtn(tb, 'dup', 'Dupliquer', 'Dupliquer juste après le clip ou la sélection (Ctrl+D)', dupClip);
+    ibtn(tb, 'xf', 'Fondu enchaîné', 'Fondu enchaîné entre deux clips sélectionnés (Maj+clic) : chevauchement à puissance constante', xfadeSel);
+    tb.appendChild(el('div', 'as-sep'));
+    ibtn(tb, 'punch', 'Punch', 'Punch : enregistrer la zone sélectionnée (Sélecteur) avec pré-roll et post-roll de 1 s', function () { punchStart(false); });
+    ibtn(tb, 'loop', 'Boucle REC', 'Enregistrer en boucle sur la zone sélectionnée : une prise par passage', function () { punchStart(true); });
+    tb.appendChild(lbl('Pré-roll'));
+    var pre = el('select', 'as-sel');
+    pre.title = 'Pré-roll du Punch (secondes avant la zone)';
+    pre.setAttribute('aria-label', 'Pré-roll du Punch');
+    PRE_OPTS.forEach(function (v) { var op = el('option', null, v + ' s'); op.value = String(v); pre.appendChild(op); });
+    pre.value = String(st.preRoll);
+    pre.addEventListener('change', function () { st.preRoll = +pre.value; });
+    st.ui.preSel = pre; tb.appendChild(pre);
+    tb.appendChild(el('div', 'as-sep'));
+    ibtn(tb, 'flag', 'Marqueur', 'Ajouter un marqueur à la tête de lecture (Entrée)', addMarkerHere);
+    ibtn(tb, 'mklist', 'Marqueurs', 'Afficher ou masquer la liste des marqueurs', function () { st.mkOpen = !st.mkOpen; renderMarkerList(); });
+    tb.appendChild(el('div', 'as-sep'));
     ibtn(tb, 'fadein', 'Fondu entrée', 'Activer / désactiver un fondu d’entrée de 0,5 s (glisser la poignée carrée du clip pour le régler)', function () { toggleFade('fadeIn'); });
     ibtn(tb, 'fadeout', 'Fondu sortie', 'Activer / désactiver un fondu de sortie de 0,5 s (glisser la poignée carrée du clip pour le régler)', function () { toggleFade('fadeOut'); });
     tb.appendChild(lbl('Courbe'));
@@ -6240,10 +8018,14 @@ select.ie-in{width:auto}
     spot.hidden = true;
     st.ui.spotWrap = spot; st.ui.spotIn = spotIn;
     tb.appendChild(spot);
+    var mkl = el('div', 'as-mklist');
+    mkl.hidden = true;
+    st.ui.mkList = mkl;
     var scroller = el('div', 'as-scroll');
     var inner = el('div', 'as-inner');
     scroller.appendChild(inner);
     win.appendChild(tb);
+    win.appendChild(mkl);
     win.appendChild(buildStripBar());
     win.appendChild(scroller);
     st.ui.scroller = scroller;
@@ -6305,6 +8087,21 @@ select.ie-in{width:auto}
     vuRow.appendChild(s.vu); vuRow.appendChild(st.ui.vuTxt); vuRow.appendChild(st.ui.vuHot);
     secIn.appendChild(vuRow);
     sh.appendChild(secIn);
+
+    // Stratégie de routage (iPhone) : valeur auto par défaut
+    var secRt = secEl('Stratégie de routage (iPhone)');
+    var rtRow = el('div', 'as-row');
+    s.route = el('select', 'as-sel');
+    s.route.setAttribute('aria-label', 'Stratégie de routage audio');
+    s.route.title = 'Stratégie de routage audio sur iPhone';
+    [['auto', 'Auto (la stratégie qui a marché, sinon A)'], ['A', 'A · session lecture + enregistrement avant le micro'], ['B', 'B · session auto, puis lecture + enregistrement'], ['C', 'C · session automatique (Safari)'], ['D', 'D · instru jouée par un lecteur média']].forEach(function (o) {
+      var op = el('option', null, o[1]); op.value = o[0]; s.route.appendChild(op);
+    });
+    s.route.addEventListener('change', function () { st.mic.route = s.route.value; micSettingsChanged(); });
+    rtRow.appendChild(s.route);
+    secRt.appendChild(rtRow);
+    secRt.appendChild(el('div', 'as-note', 'Si le son sort du haut-parleur, le test guidé de la Cabine essaie les stratégies une à une.'));
+    sh.appendChild(secRt);
 
     // Latence
     var secLat = secEl('Compensation de latence');
@@ -6508,8 +8305,10 @@ select.ie-in{width:auto}
   var HEADSETS = {
     wired: { t: 'Filaire / EarPods', s: 'Latence ≈ 40 ms', lat: 40, ic: 'headphones' },
     bt: { t: 'Bluetooth (JBL, AirPods…)', s: 'Latence ≈ 250 ms', lat: 250, ic: 'bt' },
-    none: { t: 'Sans casque', s: 'Anti-écho activé, retour micro coupé', lat: 40, ic: 'speaker' }
+    none: { t: 'Sans casque', s: 'Anti-écho activé, retour micro coupé', lat: 40, ic: 'speaker' },
+    btmix: { t: 'Casque Bluetooth pour écouter + micro de l’iPhone pour chanter', s: 'Latence ≈ 250 ms · voix de meilleure qualité', lat: 250, ic: 'bt', mix: true }
   };
+  var HEADSET_ORDER = ['wired', 'bt', 'none', 'btmix'];
   var HP_KEY = 'sf_booth_headset';
   var PRESETS = {
     studio: [{ type: 'eq', params: { low: -2, mid: 0, high: 3 } }, { type: 'comp', params: { threshold: -18, ratio: 3, attack: 0.003, release: 0.25 } }],
@@ -6569,14 +8368,126 @@ select.ie-in{width:auto}
   function saveHP(v) { try { window.localStorage.setItem(HP_KEY, v); } catch (e) { /* stockage indisponible */ } }
   function boothSetHeadset(k) {
     var h = HEADSETS[k];
+    guideClose();
     st.booth.hp = k; saveHP(k);
     st.mic.latency = h.lat; saveLatency();
     st.mic.voice = k === 'none';
-    if (k === 'none' && st.mic.monitor) setMonitor(false);
+    if ((k === 'none' || k === 'btmix') && st.mic.monitor) setMonitor(false); // retour micro coupé par défaut avec le Bluetooth
     micSettingsChanged();
-    setStatus(k === 'none' ? 'Sans casque : l’instru sera captée par le micro (anti-écho activé).' : 'Casque : ' + h.t + ' (latence ' + h.lat + ' ms).');
+    setStatus(k === 'none' ? 'Sans casque : l’instru sera captée par le micro (anti-écho activé).'
+      : (k === 'btmix' ? 'Casque Bluetooth + micro de l’iPhone (latence ' + h.lat + ' ms). Lance le test pour vérifier le routage.'
+      : 'Casque : ' + h.t + ' (latence ' + h.lat + ' ms).'));
     markDirty();
     renderBooth();
+  }
+
+  // ---------- Test d'écoute guidé : casque + micro (stratégies A, B, D, C) ----------
+  var chordUrlCache = null;
+  var CHORD = [220, 277.18, 329.63];
+  function chordUrl() {
+    if (!chordUrlCache) {
+      var sr = getCtx().sampleRate, n = Math.round(sr), L = new Float32Array(n), i, k;
+      for (i = 0; i < n; i++) {
+        var env = Math.min(1, i / (0.02 * sr), (n - i) / (0.15 * sr)), v = 0;
+        for (k = 0; k < CHORD.length; k++) v += Math.sin(2 * Math.PI * CHORD[k] * i / sr);
+        L[i] = env * v * 0.2;
+      }
+      chordUrlCache = wavUrl({ numberOfChannels: 1, sampleRate: sr, length: n, getChannelData: function () { return L; } });
+    }
+    return chordUrlCache;
+  }
+  // Accord d'1 s : Web Audio pour A, B, C ; élément audio pour D
+  function playChord(route) {
+    if (ROUTES[route].media) return playMediaUrl(chordUrl());
+    var c = getCtx(), t0 = c.currentTime + 0.05, g = c.createGain();
+    g.gain.value = 0.2; g.connect(c.destination);
+    CHORD.forEach(function (f) { var o = c.createOscillator(); o.frequency.value = f; o.connect(g); o.start(t0); o.stop(t0 + 1); });
+    return new Promise(function (res) { setTimeout(res, 1100); });
+  }
+  function guideStart() {
+    if (st.recording || st.recPending || !st.booth.hp) return;
+    var i = Math.max(0, ROUTE_ORDER.indexOf(routeOf()));
+    rx.guide = { list: ROUTE_ORDER.slice(i).concat(ROUTE_ORDER.slice(0, i)), k: 0, log: [], phase: 'run', msg: '', cur: '' };
+    guideTry();
+  }
+  function guideTry() {
+    var g = rx.guide;
+    if (!g) return;
+    var r = g.list[g.k];
+    if (!r) { guideHelp(); return; }
+    var c = getCtx();
+    if (c.state !== 'running') c.resume().catch(noop);
+    unlockMedia(); // geste utilisateur : débloque aussi le lecteur (stratégie D)
+    closeMic();
+    g.cur = r; g.phase = 'run';
+    g.msg = 'Essai ' + (g.k + 1) + ' / ' + g.list.length + ' · stratégie ' + r + ' : ' + ROUTES[r].t + '.';
+    rx.micName = ''; rx.micState = '';
+    renderGuide();
+    openMic(r).then(function () {
+      if (!rx.guide || rx.guide !== g) return;
+      renderGuide();
+      return playChord(r);
+    }).then(function () {
+      if (!rx.guide || rx.guide !== g) return;
+      g.phase = 'ask'; g.msg = 'Écoute le son (accord) : il doit sortir dans ton casque.';
+      renderGuide();
+    }).catch(function (err) {
+      if (!rx.guide || rx.guide !== g) return;
+      g.phase = 'err'; g.msg = 'Le micro n’a pas pu être ouvert pour cet essai.';
+      showMicError(err);
+      renderGuide();
+    });
+  }
+  // kind : 'yes' | 'speaker' | 'nothing'
+  function guideAnswer(kind) {
+    var g = rx.guide;
+    if (!g || g.phase !== 'ask') return;
+    var r = g.cur;
+    stopMediaTest();
+    if (kind === 'yes') {
+      saveRouteOk(r);
+      g.phase = 'done';
+      g.msg = 'Stratégie ' + r + ' validée et mémorisée. Tu peux enregistrer.';
+      g.log.push('Stratégie ' + r + ' : son entendu dans le casque.');
+      setStatus('Casque et micro validés (stratégie ' + r + ').');
+      renderGuide();
+      return;
+    }
+    g.log.push('Stratégie ' + r + (kind === 'speaker' ? ' : le son sort du haut-parleur.' : ' : rien entendu.'));
+    g.k++;
+    guideTry();
+  }
+  function guideHelp() {
+    var g = rx.guide;
+    closeMic(); stopMediaTest();
+    g.phase = 'help';
+    g.msg = 'Safari ne permet pas cette combinaison sur ton iPhone.';
+    renderGuide();
+  }
+  function guideClose() {
+    if (!rx.guide) return;
+    rx.guide = null;
+    stopMediaTest();
+    renderGuide();
+  }
+  function renderGuide() {
+    var u = st.ui, g = rx.guide, ph = g ? g.phase : '';
+    if (!u.guide) return;
+    u.guide.hidden = !g;
+    if (!g) return;
+    u.gMsg.textContent = g.msg || '';
+    u.gMsg.className = 'as-gmsg' + (ph === 'err' || ph === 'help' ? ' as-err' : '');
+    var showMic = !!rx.micName && (ph === 'run' || ph === 'ask' || ph === 'done');
+    u.gMic.hidden = !showMic;
+    u.gMic.className = 'as-gmic' + (rx.micState === 'ok' ? ' ok' : (rx.micState === 'warn' ? ' warn' : ''));
+    u.gMic.textContent = 'Micro utilisé : ' + rx.micName + (rx.micState === 'ok' ? ' (celui demandé)' : (rx.micState === 'warn' ? ' (pas celui demandé)' : ''));
+    u.gLog.innerHTML = '';
+    g.log.forEach(function (line) { u.gLog.appendChild(el('div', 'as-glog-l', line)); });
+    u.gLog.hidden = !g.log.length;
+    u.gAsk.hidden = ph !== 'ask';
+    u.gDone.hidden = ph !== 'done';
+    u.gHelp.hidden = ph !== 'help';
+    u.gRetry.hidden = !(ph === 'err' || ph === 'help');
   }
   // Enregistrement depuis la Cabine : piste « Voix » (créée si absente), décompte selon le réglage
   function boothRec(pos) {
@@ -6705,11 +8616,12 @@ select.ie-in{width:auto}
     // 2. Ton casque
     var c2 = card(box, 2, 'Ton casque');
     var hps = el('div', 'as-hps');
-    ['wired', 'bt', 'none'].forEach(function (k) {
-      var h = HEADSETS[k], b = el('button', 'as-hp');
+    HEADSET_ORDER.forEach(function (k) {
+      var h = HEADSETS[k], b = el('button', 'as-hp' + (h.mix ? ' as-hp-mix' : ''));
       b.type = 'button';
-      b.innerHTML = icon(h.ic);
+      b.innerHTML = h.mix ? '<span class="as-hp-ico">' + icon('headphones') + icon('phone') + '</span>' : icon(h.ic);
       var tx = el('span', 'as-hp-tx');
+      if (h.mix) tx.appendChild(el('span', 'as-hp-badge', 'Recommandé sur iPhone'));
       tx.appendChild(el('span', 'as-hp-t', h.t));
       tx.appendChild(el('span', 'as-hp-s', h.s));
       b.appendChild(tx);
@@ -6720,7 +8632,35 @@ select.ie-in{width:auto}
     c2.appendChild(hps);
     u.btNote = el('div', 'as-note-b', 'Le micro du casque Bluetooth enregistre en qualité réduite ; si possible, chante dans le micro de l’iPhone.');
     u.noneNote = el('div', 'as-note-b', 'Sans casque, l’instru sort des haut-parleurs et sera captée par le micro : elle se retrouvera dans ta prise. Le retour micro est coupé.');
-    c2.appendChild(u.btNote); c2.appendChild(u.noneNote);
+    u.btmixNote = el('div', 'as-note-b', 'L’instru sort dans ton casque Bluetooth, et ta voix est captée par le micro de l’iPhone. Safari ne garantit pas cette combinaison : lance le test pour vérifier.');
+    c2.appendChild(u.btNote); c2.appendChild(u.noneNote); c2.appendChild(u.btmixNote);
+    // Test d'écoute guidé (visible dès qu'un casque est choisi)
+    u.tBtn = cbtn(c2, 'test', 'Tester mon casque et mon micro', 'xl', guideStart);
+    u.guide = el('div', 'as-guide'); u.guide.hidden = true;
+    u.gMic = el('div', 'as-gmic', ''); u.gMsg = el('div', 'as-gmsg', '');
+    u.gMsg.setAttribute('role', 'status'); u.gMsg.setAttribute('aria-live', 'polite');
+    u.gLog = el('div', 'as-glog');
+    u.gAsk = el('div', 'as-gask');
+    u.gAsk.appendChild(el('div', 'as-gq', 'Tu entends le son dans ton casque ?'));
+    var gaRow = el('div', 'as-gopts');
+    cbtn(gaRow, 'check', 'Oui', 'keep', function () { guideAnswer('yes'); });
+    cbtn(gaRow, 'speaker', 'Non, il sort du haut-parleur', '', function () { guideAnswer('speaker'); });
+    cbtn(gaRow, 'close', 'Non, rien', '', function () { guideAnswer('nothing'); });
+    u.gAsk.appendChild(gaRow);
+    u.gHelp = el('div', 'as-ghelp'); u.gHelp.hidden = true;
+    u.gHelp.appendChild(el('div', 'as-note-b', 'Solutions : 1) écouteurs filaires (adaptateur Lightning ou USB-C), 2) casque Bluetooth seul (micro du casque, qualité réduite), 3) sans casque avec l’anti-écho.'));
+    var ghRow = el('div', 'as-gopts');
+    cbtn(ghRow, 'headphones', 'Écouteurs filaires', '', function () { boothSetHeadset('wired'); });
+    cbtn(ghRow, 'bt', 'Casque Bluetooth seul', '', function () { boothSetHeadset('bt'); });
+    cbtn(ghRow, 'speaker', 'Sans casque', '', function () { boothSetHeadset('none'); });
+    u.gHelp.appendChild(ghRow);
+    u.gDone = el('div', 'as-gopts'); u.gDone.hidden = true;
+    cbtn(u.gDone, 'close', 'Fermer le test', 'keep', guideClose);
+    u.gRetry = cbtn(null, 'retry', 'Recommencer le test', '', guideStart);
+    u.gRetry.hidden = true;
+    u.guide.appendChild(u.gMic); u.guide.appendChild(u.gMsg); u.guide.appendChild(u.gLog);
+    u.guide.appendChild(u.gAsk); u.guide.appendChild(u.gHelp); u.guide.appendChild(u.gDone); u.guide.appendChild(u.gRetry);
+    c2.appendChild(u.guide);
     var fine = el('button', 'as-link', 'Réglage fin (latence, calibrage)');
     fine.type = 'button';
     fine.addEventListener('click', function () { toggleSheet(true); });
@@ -6776,6 +8716,8 @@ select.ie-in{width:auto}
     u.stopBtn.innerHTML = icon('stop') + '<span>Stop</span>';
     u.stopBtn.setAttribute('aria-label', 'Arrêter l’enregistrement');
     u.stopBtn.addEventListener('click', function () { toggleRecord(); });
+    u.recMic = el('div', 'as-micl', ''); u.recMic.hidden = true;
+    u.recLive.appendChild(u.recMic);
     u.recLive.appendChild(u.cd); u.recLive.appendChild(u.chrono); u.recLive.appendChild(u.lw);
     u.recLive.appendChild(pg); u.recLive.appendChild(u.stopBtn);
     c3.appendChild(u.recLive);
@@ -6836,6 +8778,30 @@ select.ie-in{width:auto}
     cbtn(acts, 'play', 'Écouter le résultat', 'xl', function () { if (st.recording) return; stopPreview(); seek(0); play(); });
     cbtn(acts, 'export', 'Exporter', 'xl', function () { exportMix(); });
     cbtn(acts, 'wave', 'Ouvrir l’éditeur', 'xl', function () { showTab('edit'); });
+    var exo = el('div', 'as-exp');
+    var exSr = el('select', 'as-sel');
+    exSr.setAttribute('aria-label', 'Fréquence d’export');
+    exSr.title = 'Fréquence d’échantillonnage de l’export';
+    EXP_SR.forEach(function (o) { var op = el('option', null, o[1]); op.value = o[0]; exSr.appendChild(op); });
+    exSr.value = String(st.exp.sr);
+    exSr.addEventListener('change', function () { st.exp.sr = +exSr.value; });
+    var exBits = el('select', 'as-sel');
+    exBits.setAttribute('aria-label', 'Profondeur d’export');
+    exBits.title = 'Profondeur en bits du fichier WAV';
+    EXP_BITS.forEach(function (o) { var op = el('option', null, o[1]); op.value = o[0]; exBits.appendChild(op); });
+    exBits.value = String(st.exp.bits);
+    exBits.addEventListener('change', function () { st.exp.bits = +exBits.value; });
+    var mst = chip(st.exp.master ? 'Master inclus' : 'Master exclu', 'Inclure le master (volume général, limiteur) dans les pistes séparées', st.exp.master, 'as-wide', function () {
+      st.exp.master = !st.exp.master;
+      mst.textContent = st.exp.master ? 'Master inclus' : 'Master exclu';
+      mst.classList.toggle('on', st.exp.master);
+      mst.setAttribute('aria-pressed', st.exp.master ? 'true' : 'false');
+    });
+    exo.appendChild(exSr); exo.appendChild(exBits); exo.appendChild(mst);
+    c4.appendChild(exo);
+    var stemsRow = el('div', 'as-acts');
+    cbtn(stemsRow, 'export', 'Exporter les pistes séparées (.zip)', 'xl', function () { exportStems(); });
+    c4.appendChild(stemsRow);
     c4.appendChild(acts);
 
     p.appendChild(win);
@@ -6891,11 +8857,17 @@ select.ie-in{width:auto}
     });
     u.btNote.hidden = b.hp !== 'bt';
     u.noneNote.hidden = b.hp !== 'none';
+    u.btmixNote.hidden = b.hp !== 'btmix';
+    u.tBtn.hidden = !b.hp;
+    u.guide.hidden = !rx.guide;
     var mp = micPill();
     setPill(u.bMic, mp[0], mp[1]);
     setPill(u.bHp, b.hp ? 'ok' : '', b.hp ? HEADSETS[b.hp].t : 'Casque : à choisir');
     var rec = st.recording;
     u.recIdle.hidden = rec; u.recLive.hidden = !rec;
+    u.recMic.hidden = !rec;
+    u.recMic.textContent = 'Micro : ' + (rx.micName || 'non précisé');
+    u.recMic.className = 'as-micl' + (rx.micState === 'ok' ? ' ok' : (rx.micState === 'warn' ? ' warn' : ''));
     u.step3.classList.toggle('as-onair', rec);
     u.recBtn.disabled = st.recPending || st.sess.pending;
     u.recLbl.textContent = st.recPending ? 'Ouverture du micro…' : (st.sess.pending ? 'Session à trancher' : 'Enregistrer');
@@ -7036,6 +9008,7 @@ select.ie-in{width:auto}
     return {
       bpm: st.bpm, masterDb: st.masterDb, curve: st.curve, mode: st.mode, pxPerSec: st.pxPerSec,
       takeSeq: st.takeSeq, nextId: st.nextId, armedId: st.armedId,
+      markers: st.markers, markerSeq: st.markerSeq, preRoll: st.preRoll,
       tracks: cloneP(st.tracks), clips: clips, takes: takes,
       mic: { countIn: st.mic.countIn, instru: st.mic.instru },
       booth: { count: st.booth.count, start: st.booth.start, lastId: st.booth.lastId, acap: st.booth.acap }
@@ -7155,6 +9128,7 @@ select.ie-in{width:auto}
       }
       st.masterDb = S.masterDb; st.bpm = S.bpm; st.curve = S.curve; st.mode = S.mode; st.pxPerSec = S.pxPerSec;
       st.takeSeq = S.takeSeq; st.nextId = Math.max(st.nextId, S.nextId);
+      st.markers = (S.markers || []).map(cloneP); st.markerSeq = S.markerSeq || 0; st.preRoll = S.preRoll != null ? S.preRoll : 2; st.selSet = []; autoRt = {};
       st.tracks = S.tracks;
       st.clips = fix(S.clips);
       st.takes = fix(S.takes);
@@ -7187,7 +9161,7 @@ select.ie-in{width:auto}
     }).then(function () {
       pBuf = new WeakMap();
       st.sess.pending = false; st.sess.found = null; st.sess.saved = {}; st.sess.bufs = []; st.sess.lastKey = '';
-      st.tracks = []; st.clips = []; st.takes = [];
+      st.tracks = []; st.clips = []; st.takes = []; st.markers = []; st.markerSeq = 0; st.selSet = []; autoRt = {};
       st.selClip = null; st.selTrack = null; st.selRange = null; st.armedId = null;
       st.booth.lastId = null;
       st.undo = []; st.redo = [];
@@ -7229,6 +9203,10 @@ select.ie-in{width:auto}
         else if (e.shiftKey && e.code === 'ArrowUp') { e.preventDefault(); nudgeGain(0.5); }
         else if (e.shiftKey && e.code === 'ArrowDown') { e.preventDefault(); nudgeGain(-0.5); }
         else if (e.shiftKey && e.code === 'KeyB') { e.preventDefault(); resetGain(); }
+        else if (e.code === 'KeyC' && !e.shiftKey) { e.preventDefault(); copySel(); }
+        else if (e.code === 'KeyX' && !e.shiftKey) { e.preventDefault(); cutSel(); }
+        else if (e.code === 'KeyV' && !e.shiftKey) { e.preventDefault(); pasteClip(); }
+        else if (e.code === 'KeyD' && !e.shiftKey) { e.preventDefault(); dupClip(); }
         return;
       }
       if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) togglePlay(); }
@@ -7236,6 +9214,7 @@ select.ie-in{width:auto}
       else if (e.code === 'KeyB') { e.preventDefault(); splitSelected(); }
       else if (e.code === 'Delete') { e.preventDefault(); deleteSelected(); }
       else if (e.code === 'Escape' && st.sheet) { toggleSheet(false); }
+      else if (e.code === 'Enter') { e.preventDefault(); if (!e.repeat) addMarkerHere(); }
     });
     document.addEventListener('keyup', function (e) {
       if (active() && e.code === 'Space' && !typing(e.target)) e.preventDefault();
@@ -7311,7 +9290,7 @@ select.ie-in{width:auto}
       chain = chain.then(function () {
         return f.arrayBuffer()
           .then(function (ab) { return c.decodeAudioData(ab); })
-          .then(function (buf) { addTrackWithClip(buf, baseName(f.name)); n++; })
+          .then(function (buf) { if (importBig(buf, baseName(f.name))) return; addTrackWithClip(buf, baseName(f.name)); n++; })
           .catch(function (err) { setStatus('Import impossible : ' + f.name + ' (' + ((err && err.message) || err) + ')', true); });
       });
     });
@@ -7355,32 +9334,239 @@ select.ie-in{width:auto}
       setStatus('Son généré : ' + label + '.');
     }).catch(function (err) { setStatus('Génération impossible : ' + ((err && err.message) || err), true); });
   }
-  function encodeWav(buf) {
-    var nch = 2, sr = buf.sampleRate, n = buf.length;
-    var bytes = 44 + n * nch * 2;
-    var ab = new ArrayBuffer(bytes), v = new DataView(ab);
+  // ---------- Marqueurs ----------
+  function addMarkerHere() {
+    st.markerSeq += 1;
+    var t = Math.round(currentPos() * 1000) / 1000;
+    st.markers.push({ id: uid('m'), t: t, name: 'Marqueur ' + st.markerSeq });
+    st.markers.sort(function (a, b) { return a.t - b.t; });
+    edited('Ajouter un marqueur');
+    setStatus('Marqueur ajouté à ' + fmtTime(t, true) + '.');
+  }
+  function buildMarkerRow(inner, H, pps, end) {
+    var row = el('div', 'as-mk-row');
+    var sp = el('div', 'as-mk-spacer'); sp.style.width = H + 'px';
+    var lane = el('div', 'as-mk-lane'); lane.style.width = Math.ceil(end * pps) + 'px';
+    row.appendChild(sp); row.appendChild(lane);
+    st.markers.forEach(function (m) {
+      var mk = el('div', 'as-mk');
+      mk.style.left = (m.t * pps) + 'px';
+      var flag = el('div', 'as-mk-flag');
+      flag.title = 'Marqueur : cliquer pour y aller, glisser pour le déplacer';
+      var nm = inp('text', 'as-mk-in');
+      nm.value = m.name;
+      nm.title = 'Nom du marqueur';
+      nm.setAttribute('aria-label', 'Nom du marqueur');
+      nm.addEventListener('change', function () { m.name = nm.value.trim() || m.name; pushHistory('Renommer le marqueur'); });
+      nm.addEventListener('keydown', function (e) { if (e.key === 'Enter') nm.blur(); });
+      flag.addEventListener('pointerdown', function (e) {
+        if (e.button !== 0) return;
+        e.preventDefault(); e.stopPropagation();
+        var t0 = m.t, moved = false;
+        startDrag(e, function (dx) {
+          if (Math.abs(dx) > 3) moved = true;
+          if (!moved) return;
+          m.t = Math.max(0, Math.round((t0 + dx / pps) * 1000) / 1000);
+          mk.style.left = (m.t * pps) + 'px';
+        }, function () {
+          if (moved) { st.markers.sort(function (a, b) { return a.t - b.t; }); edited('Déplacer le marqueur'); }
+          else seek(m.t);
+        });
+      });
+      mk.appendChild(flag); mk.appendChild(nm);
+      lane.appendChild(mk);
+    });
+    inner.appendChild(row);
+  }
+  // Liste des marqueurs : nom, position, aller, supprimer
+  function renderMarkerList() {
+    var box = st.ui.mkList;
+    if (!box) return;
+    box.hidden = !st.mkOpen;
+    box.innerHTML = '';
+    if (!st.mkOpen) return;
+    if (!st.markers.length) { box.appendChild(el('div', 'as-note', 'Aucun marqueur. Entrée (ou le bouton Marqueur) en pose un à la tête de lecture.')); return; }
+    st.markers.forEach(function (m) {
+      var row = el('div', 'as-mkl');
+      var nm = inp('text', 'as-mk-in as-mkl-n');
+      nm.value = m.name;
+      nm.setAttribute('aria-label', 'Nom du marqueur');
+      nm.addEventListener('change', function () { m.name = nm.value.trim() || m.name; pushHistory('Renommer le marqueur'); renderMarkerList(); });
+      nm.addEventListener('keydown', function (e) { if (e.key === 'Enter') nm.blur(); });
+      row.appendChild(nm);
+      row.appendChild(el('span', 'as-mlbl2', fmtTime(m.t, true)));
+      ibtn(row, 'play', 'Aller', 'Aller au marqueur', function () { seek(m.t); }, '');
+      ibtn(row, 'trash', '', 'Supprimer ce marqueur', function () {
+        st.markers = st.markers.filter(function (x) { return x !== m; });
+        edited('Supprimer le marqueur');
+      }, '');
+      box.appendChild(row);
+    });
+  }
+
+  // ---------- Punch et boucle d'enregistrement (zone sélectionnée + piste armée) ----------
+  function punchStart(loop) {
+    if (st.recording || st.recPending || rx.ending) return;
+    var r = st.selRange;
+    if (!r || r.b - r.a < 0.05) { setStatus('Sélectionnez une zone temporelle avec le Sélecteur, puis lancez le Punch ou la boucle.', true); return; }
+    if (st.playing) pause();
+    st.recMode = loop ? { kind: 'loop', a: r.a, b: r.b } : { kind: 'punch', a: r.a, b: r.b };
+    st.playhead = loop ? r.a : Math.max(0, r.a - st.preRoll);
+    startRecording();
+    if (!st.recording && !st.recPending) st.recMode = null;
+    renderAll();
+    kick();
+  }
+
+  // ---------- Automation : voie sous la piste (Volume ou Pan, points déplaçables) ----------
+  function valToY(p, v) { var f = p === 'vol' ? (v + 60) / 66 : (v + 100) / 200; return (1 - clamp(f, 0, 1)) * (AUTO_H - 16) + 8; }
+  function yToVal(p, y) { var f = 1 - clamp((y - 8) / (AUTO_H - 16), 0, 1); return p === 'vol' ? -60 + f * 66 : -100 + f * 200; }
+  function sortAuto(t, p) { autoOf(t)[p].sort(function (a, b) { return a.t - b.t; }); }
+  function paintAutoLine(svg, t, p) {
+    var pps = st.pxPerSec, pts = autoOf(t)[p], W = +svg.getAttribute('width'), s;
+    if (pts.length) {
+      s = '0,' + valToY(p, pts[0].v).toFixed(1);
+      pts.forEach(function (q) { s += ' ' + (q.t * pps).toFixed(1) + ',' + valToY(p, q.v).toFixed(1); });
+      s += ' ' + W + ',' + valToY(p, pts[pts.length - 1].v).toFixed(1);
+    } else {
+      var y = valToY(p, p === 'vol' ? t.db : t.pan).toFixed(1);
+      s = '0,' + y + ' ' + W + ',' + y;
+    }
+    svg.querySelector('.as-apoly').setAttribute('points', s);
+  }
+  function placeDot(c, p, pt) { c.setAttribute('cx', (pt.t * st.pxPerSec).toFixed(1)); c.setAttribute('cy', valToY(p, pt.v).toFixed(1)); }
+  function removeAutoPt(t, p, pt) {
+    var list = autoOf(t)[p], i = list.indexOf(pt);
+    if (i >= 0) { list.splice(i, 1); edited('Supprimer un point d’automation'); }
+  }
+  function makeAutoDot(svg, lane, t, p, pt) {
+    var c = document.createElementNS(NS_SVG, 'circle');
+    c.setAttribute('class', 'as-apt'); c.setAttribute('r', '5');
+    placeDot(c, p, pt);
+    c.addEventListener('pointerdown', function (e) { if (e.button === 0) autoDrag(e, svg, lane, t, p, pt, c, true); });
+    c.addEventListener('dblclick', function (e) { e.stopPropagation(); removeAutoPt(t, p, pt); });
+    return c;
+  }
+  // Glisser un point ; appui long sans mouvement = suppression ; sans mouvement = simple clic
+  function autoDrag(e, svg, lane, t, p, pt, c, longDel) {
+    e.preventDefault(); e.stopPropagation();
+    var moved = false, done = false;
+    var timer = longDel ? setTimeout(function () { if (!moved && !done) { done = true; removeAutoPt(t, p, pt); } }, 600) : null;
+    startDrag(e, function (dx, dy, ev) {
+      if (Math.abs(dx) + Math.abs(dy) > 3) { moved = true; clearTimeout(timer); }
+      if (!moved) return;
+      var r = lane.getBoundingClientRect();
+      pt.t = Math.max(0, r3((ev.clientX - r.left) / st.pxPerSec));
+      pt.v = r3(yToVal(p, ev.clientY - r.top));
+      placeDot(c, p, pt);
+      paintAutoLine(svg, t, p);
+    }, function () {
+      clearTimeout(timer);
+      if (done) return;
+      done = true;
+      sortAuto(t, p);
+      edited(moved ? 'Déplacer un point d’automation' : 'Point d’automation');
+    });
+  }
+  // Clic dans la voie : ajoute un point à cet endroit, puis le point peut être glissé
+  function addAutoPoint(e, svg, lane, t, p) {
+    if (e.button !== 0) return;
+    var r = lane.getBoundingClientRect();
+    var pt = { t: r3(Math.max(0, (e.clientX - r.left) / st.pxPerSec)), v: r3(yToVal(p, e.clientY - r.top)) };
+    autoOf(t)[p].push(pt);
+    sortAuto(t, p);
+    var c = makeAutoDot(svg, lane, t, p, pt);
+    svg.appendChild(c);
+    paintAutoLine(svg, t, p);
+    autoDrag(e, svg, lane, t, p, pt, c, false);
+  }
+  function buildAutoRow(t, end) {
+    var a = autoOf(t), pps = st.pxPerSec, W = Math.ceil(end * pps);
+    var row = el('div', 'as-auto-row');
+    row.style.height = AUTO_H + 'px';
+    var hd = el('div', 'as-auto-hd');
+    hd.style.width = hdrW() + 'px';
+    var ps = el('select', 'as-sel as-auto-sel');
+    ps.setAttribute('aria-label', 'Paramètre automatisé de ' + t.name);
+    [['vol', 'Volume'], ['pan', 'Pan']].forEach(function (o) { var op = el('option', null, o[1]); op.value = o[0]; ps.appendChild(op); });
+    ps.value = a.param;
+    ps.addEventListener('change', function () { a.param = ps.value; renderAll(); });
+    var ms = el('select', 'as-sel as-auto-sel');
+    ms.title = 'Mode d’automation : Off, Read, Touch, Latch ou Write';
+    ms.setAttribute('aria-label', 'Mode d’automation de ' + t.name);
+    AUTO_MODES.forEach(function (o) { var op = el('option', null, o[1]); op.value = o[0]; ms.appendChild(op); });
+    ms.value = a.mode;
+    ms.addEventListener('change', function () {
+      autoRecDiscard();
+      a.mode = ms.value;
+      var rt = rtOf(t); rt.tv = false; rt.tp = false; rt.lv = false; rt.lp = false;
+      edited('Mode d’automation « ' + t.name + ' » : ' + ms.options[ms.selectedIndex].text);
+    });
+    hd.appendChild(ps); hd.appendChild(ms);
+    var lane = el('div', 'as-alane');
+    lane.style.width = W + 'px'; lane.style.height = AUTO_H + 'px';
+    var svg = document.createElementNS(NS_SVG, 'svg');
+    svg.setAttribute('class', 'as-asvg'); svg.setAttribute('width', W); svg.setAttribute('height', AUTO_H);
+    var bg = document.createElementNS(NS_SVG, 'rect');
+    bg.setAttribute('class', 'as-abg'); bg.setAttribute('x', '0'); bg.setAttribute('y', '0');
+    bg.setAttribute('width', W); bg.setAttribute('height', AUTO_H);
+    bg.addEventListener('pointerdown', function (e) { addAutoPoint(e, svg, lane, t, a.param); });
+    svg.appendChild(bg);
+    var pl = document.createElementNS(NS_SVG, 'polyline');
+    pl.setAttribute('class', 'as-apoly');
+    svg.appendChild(pl);
+    a[a.param].forEach(function (pt) { svg.appendChild(makeAutoDot(svg, lane, t, a.param, pt)); });
+    paintAutoLine(svg, t, a.param);
+    lane.appendChild(svg);
+    row.appendChild(hd); row.appendChild(lane);
+    return row;
+  }
+  // Chevauchements de clips : zone X (fondu enchaîné)
+  function drawOverlaps(lane, tid) {
+    overlapsOf(tid).forEach(function (o) {
+      var x = el('div', 'as-xf');
+      x.style.left = (o.s * st.pxPerSec) + 'px';
+      x.style.width = Math.max(2, o.d * st.pxPerSec) + 'px';
+      x.title = 'Fondu enchaîné : ' + o.d.toFixed(2) + ' s';
+      lane.appendChild(x);
+    });
+  }
+  // Prise en main : Touch et Latch sur les contrôles (fader du Mixage, potard de pan)
+  function touchHooks(el2, t, p) {
+    el2.addEventListener('pointerdown', function () { touchStart(t, p); });
+    el2.addEventListener('pointerup', function () { touchEnd(t, p); });
+    el2.addEventListener('pointercancel', function () { touchEnd(t, p); });
+  }
+
+  // ---------- Export : WAV 16 / 24 bits, pistes séparées en .zip ----------
+  function wavBytes(buf, bits) {
+    var nch = 2, sr = buf.sampleRate, n = buf.length, bps = bits / 8;
+    var bytes = 44 + n * nch * bps, ab = new ArrayBuffer(bytes), v = new DataView(ab);
     function ws(off, s) { for (var i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); }
     ws(0, 'RIFF'); v.setUint32(4, bytes - 8, true); ws(8, 'WAVE');
     ws(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
     v.setUint16(22, nch, true); v.setUint32(24, sr, true);
-    v.setUint32(28, sr * nch * 2, true); v.setUint16(32, nch * 2, true); v.setUint16(34, 16, true);
-    ws(36, 'data'); v.setUint32(40, n * nch * 2, true);
-    var L = buf.getChannelData(0), R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : L;
-    var o = 44;
-    for (var i = 0; i < n; i++) {
-      for (var ch = 0; ch < nch; ch++) {
-        var x = clamp(ch === 0 ? L[i] : R[i], -1, 1);
-        v.setInt16(o, x < 0 ? x * 0x8000 : x * 0x7fff, true);
-        o += 2;
+    v.setUint32(28, sr * nch * bps, true); v.setUint16(32, nch * bps, true); v.setUint16(34, bits, true);
+    ws(36, 'data'); v.setUint32(40, n * nch * bps, true);
+    var L = buf.getChannelData(0), R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : L, o = 44, i, ch, x, q;
+    for (i = 0; i < n; i++) {
+      for (ch = 0; ch < nch; ch++) {
+        x = clamp(ch === 0 ? L[i] : R[i], -1, 1);
+        if (bits === 24) {
+          q = Math.round(x < 0 ? x * 0x800000 : x * 0x7fffff);
+          if (q < 0) q += 0x1000000;
+          v.setUint8(o, q & 255); v.setUint8(o + 1, (q >> 8) & 255); v.setUint8(o + 2, (q >> 16) & 255);
+        } else {
+          v.setInt16(o, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+        }
+        o += bps;
       }
     }
-    return new Blob([ab], { type: 'audio/wav' });
+    return ab;
   }
-  function exportMix() {
-    if (st.exporting) return;
-    var end = projectEnd();
-    if (end <= 0) { setStatus('Rien à exporter : ajoutez au moins un clip.', true); return; }
-    // Queue de réverbération / delay : le fichier inclut la fin des effets
+  function encodeWav(buf, bits) { return new Blob([wavBytes(buf, bits || 16)], { type: 'audio/wav' }); }
+  // Queue de réverbération / delay : le fichier inclut la fin des effets
+  function exportTail() {
     var tail = 0;
     st.tracks.forEach(function (t) {
       (t.inserts || []).forEach(function (i) {
@@ -7389,24 +9575,133 @@ select.ie-in{width:auto}
         if (i.type === 'delay') tail = Math.max(tail, 2);
       });
     });
-    var sr = SR_EXPORT, c;
-    try { c = new OfflineAudioContext(2, Math.ceil((end + tail) * sr), sr); }
+    return tail;
+  }
+  function exportMix() {
+    if (st.exporting) return;
+    var end = projectEnd();
+    if (end <= 0) { setStatus('Rien à exporter : ajoutez au moins un clip.', true); return; }
+    var sr = +st.exp.sr, c;
+    try { c = new OfflineAudioContext(2, Math.ceil((end + exportTail()) * sr), sr); }
     catch (e) { setStatus('Export impossible : ' + e.message, true); return; }
-    var g = buildGraph(c, c.destination, false);
+    var g = buildGraph(c, c.destination, false, {});
     startSources(g, 0, 0, null);
     st.exporting = true;
     setStatus('Rendu du mixage en cours…');
     c.startRendering().then(function (buf) {
       st.exporting = false;
       var dur = buf.duration.toFixed(1);
-      (window.sfSave ? window.sfSave('mixage.wav', encodeWav(buf)) : Promise.resolve('Téléchargement indisponible.'))
+      return (window.sfSave ? window.sfSave('mixage.wav', encodeWav(buf, +st.exp.bits)) : Promise.resolve('Téléchargement indisponible.'))
         .then(function (msg) { setStatus(msg || ('Mixage exporté (mixage.wav, ' + dur + ' s).')); });
     }).catch(function (err) {
       st.exporting = false;
       setStatus('Export échoué : ' + ((err && err.message) || err), true);
     });
   }
-
+  // Rendu hors ligne d'une seule piste (inserts, fader, pan, automation, envois) ; aux : retour des envois
+  function renderTrackOnly(t, end, sr, withMaster) {
+    var c = new OfflineAudioContext(2, Math.ceil((end + exportTail()) * sr), sr);
+    var g = buildGraph(c, c.destination, false, { only: t, master: withMaster });
+    startSources(g, 0, 0, null);
+    return c.startRendering();
+  }
+  function stemName(name, used) {
+    var base = String(name || 'Piste').replace(/[\\\/:*?"<>|\x00-\x1f]/g, '_').trim() || 'Piste', n = base, k = 2;
+    while (used[n]) { n = base + '_' + k; k++; }
+    used[n] = true;
+    return n + '.wav';
+  }
+  function exportStems() {
+    if (st.exporting) return;
+    var end = projectEnd();
+    if (end <= 0) { setStatus('Rien à exporter : ajoutez au moins un clip.', true); return; }
+    var list = st.tracks.filter(function (t) { return t.type === 'aux' || clipsOf(t.id).length > 0; });
+    if (!list.length) { setStatus('Aucune piste à exporter.', true); return; }
+    st.exporting = true;
+    var sr = +st.exp.sr, bits = +st.exp.bits, withMaster = !!st.exp.master, files = [], used = {}, chain = Promise.resolve();
+    list.forEach(function (t, k) {
+      chain = chain.then(function () {
+        setStatus('Rendu de « ' + t.name + ' » (' + (k + 1) + ' / ' + list.length + ')…');
+        return renderTrackOnly(t, end, sr, withMaster).then(function (buf) {
+          files.push({ name: stemName(t.name, used), data: new Uint8Array(wavBytes(buf, bits)) });
+        });
+      });
+    });
+    chain.then(function () {
+      st.exporting = false;
+      var zip = makeZip(files);
+      return window.sfSave ? window.sfSave('stems.zip', zip) : Promise.resolve('Téléchargement indisponible.');
+    }).then(function (msg) {
+      setStatus(msg || ('Pistes exportées : stems.zip (' + files.length + ' fichiers WAV).'));
+    }).catch(function (err) {
+      st.exporting = false;
+      setStatus('Export des pistes échoué : ' + ((err && err.message) || err), true);
+    });
+  }
+  var CRC_T = null;
+  function crc32(u8) {
+    if (!CRC_T) {
+      CRC_T = new Uint32Array(256);
+      for (var n = 0; n < 256; n++) {
+        var c = n;
+        for (var k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+        CRC_T[n] = c >>> 0;
+      }
+    }
+    var crc = 0xFFFFFFFF;
+    for (var i = 0; i < u8.length; i++) crc = CRC_T[(crc ^ u8[i]) & 255] ^ (crc >>> 8);
+    return (crc ^ 0xFFFFFFFF) >>> 0;
+  }
+  // Archive ZIP sans compression (méthode « stored »), écrite à la main avec CRC-32
+  function makeZip(files) {
+    var enc = new TextEncoder(), parts = [], central = [], offset = 0, cdSize = 0, i;
+    for (i = 0; i < files.length; i++) {
+      var f = files[i], nameB = enc.encode(f.name), crc = crc32(f.data), size = f.data.length;
+      var lh = new DataView(new ArrayBuffer(30));
+      lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true);
+      lh.setUint16(8, 0, true); lh.setUint16(10, 0, true); lh.setUint16(12, 33, true);
+      lh.setUint32(14, crc, true); lh.setUint32(18, size, true); lh.setUint32(22, size, true);
+      lh.setUint16(26, nameB.length, true); lh.setUint16(28, 0, true);
+      parts.push(new Uint8Array(lh.buffer), nameB, f.data);
+      var ch = new DataView(new ArrayBuffer(46));
+      ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true);
+      ch.setUint16(8, 0x0800, true); ch.setUint16(10, 0, true); ch.setUint16(12, 0, true); ch.setUint16(14, 33, true);
+      ch.setUint32(16, crc, true); ch.setUint32(20, size, true); ch.setUint32(24, size, true);
+      ch.setUint16(28, nameB.length, true); ch.setUint16(30, 0, true); ch.setUint16(32, 0, true);
+      ch.setUint16(34, 0, true); ch.setUint16(36, 0, true); ch.setUint32(38, 0, true); ch.setUint32(42, offset, true);
+      central.push(new Uint8Array(ch.buffer), nameB);
+      cdSize += 46 + nameB.length;
+      offset += 30 + nameB.length + size;
+    }
+    var end = new DataView(new ArrayBuffer(22));
+    end.setUint32(0, 0x06054b50, true); end.setUint16(4, 0, true); end.setUint16(6, 0, true);
+    end.setUint16(8, files.length, true); end.setUint16(10, files.length, true);
+    end.setUint32(12, cdSize, true); end.setUint32(16, offset, true); end.setUint16(20, 0, true);
+    return new Blob(parts.concat(central, [new Uint8Array(end.buffer)]), { type: 'application/zip' });
+  }
+  // Garde-fous d'import : fichier de plus de 15 min, ou décodé trop lourd en mémoire (300 Mo, 150 Mo sur iOS / faible mémoire)
+  function importBig(buf, name) {
+    var dur = buf.duration, mb = dur * buf.sampleRate * buf.numberOfChannels * 4 / 1048576;
+    var ua = navigator.userAgent || '', ios = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    var low = ios || (navigator.deviceMemory && navigator.deviceMemory <= 4);
+    if (dur <= LONG_MIN && mb <= (low ? MEM_MAX_MB_LOW : MEM_MAX_MB)) return false;
+    showBannerAct('Fichier long (' + (dur / 60).toFixed(1) + ' min, ~' + Math.round(mb) + ' Mo) : ' + name, 'err', [
+      { label: 'Importer quand même', primary: true, fn: function () { hideBanner(); addTrackWithClip(buf, name); renderAll(); pushHistory('Importer audio'); setStatus(name + ' importé.'); } },
+      { label: 'Annuler', fn: function () { hideBanner(); setStatus('Import annulé : ' + name + '.'); } }
+    ]);
+    return true;
+  }
+  function showBannerAct(msg, kind, actions) {
+    var b = st.ui.banner;
+    if (!b) return;
+    b.innerHTML = '';
+    b.className = 'as-banner ' + (kind === 'err' ? 'as-err-box' : 'as-info-box');
+    b.appendChild(el('span', 'as-banner-txt', msg));
+    var acts = el('div', 'as-banner-acts');
+    actions.forEach(function (a) { tbtn(acts, a.label, a.label, a.fn, a.primary ? 'on' : ''); });
+    b.appendChild(acts);
+    b.hidden = false;
+  }
   function init(rootEl) {
     if (!rootEl || st.root) return;
     st.root = rootEl;
@@ -7434,6 +9729,10 @@ select.ie-in{width:auto}
     bindUnlock();
     bindDevices();
     bindPinch(st.ui.scroller);
+    var scrollRaf = 0;
+    st.ui.scroller.addEventListener('scroll', function () {
+      if (!scrollRaf) scrollRaf = requestAnimationFrame(function () { scrollRaf = 0; repaintVisibleClips(); });
+    });
     st.pending.splice(0).forEach(function (p) { addTrackWithClip(p[0], p[1]); });
     st.last = snapshot(); st.lastSer = serial(st.last);
     st.mic.latency = loadLatency();
@@ -7467,7 +9766,10 @@ select.ie-in{width:auto}
     _debug: function () {
       return {
         tracks: st.tracks.map(function (t) { return { id: t.id, type: t.type, name: t.name, clips: clipsOf(t.id).length }; }),
-        clips: st.clips.map(function (c) { return { name: c.name, trackId: c.trackId, start: c.start, duration: c.duration }; }),
+        clips: st.clips.map(function (c) { return { id: c.id, name: c.name, trackId: c.trackId, start: c.start, duration: c.duration, offset: c.offset, fadeIn: c.fadeIn, fadeOut: c.fadeOut, takeId: c.takeId || null, gainDb: c.gainDb }; }),
+        markers: st.markers.map(function (m) { return { name: m.name, t: m.t }; }),
+        auto: st.tracks.map(function (t) { var a = t.auto || {}; return { id: t.id, mode: a.mode || 'off', vol: (a.vol || []).map(function (q) { return [q.t, q.v]; }), pan: (a.pan || []).length }; }),
+        selSet: (st.selSet || []).length,
         undo: st.undo.length,
         redo: st.redo.length,
         playing: st.playing,
