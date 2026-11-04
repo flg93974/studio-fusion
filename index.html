@@ -49,6 +49,9 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
 #sf-dur{width:58px;height:34px;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:0 8px;font:13px var(--mono)}
 #sf-status{font-size:12px;color:var(--muted);max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #sf-status.ok{color:var(--ok)}
+[hidden]{display:none!important}
+#sf-prog{position:absolute;left:0;bottom:0;height:2px;width:0;background:var(--grad);transition:width .15s;z-index:6;pointer-events:none}
+.sf-btn:disabled,#sf-dur:disabled{opacity:.5;cursor:wait}
 #sf-work{flex:1;display:flex;flex-direction:column;min-height:0}
 .sf-pane{flex:1;min-height:0;position:relative;overflow:hidden}
 #sf-work[data-mode=image] #sf-audio{display:none}
@@ -81,6 +84,27 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
   #sf-work[data-mode=split]{flex-direction:column}
   #sf-toast{display:block}
 }
+#sf-welcome{position:fixed;inset:0;z-index:9998;display:none;align-items:center;justify-content:center;padding:20px;padding-bottom:max(20px,env(safe-area-inset-bottom));
+  background:radial-gradient(800px 500px at 20% 0%,rgba(34,211,238,.18),transparent 60%),radial-gradient(800px 600px at 100% 100%,rgba(244,63,94,.16),transparent 55%),rgba(8,6,14,.94);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}
+#sf-welcome.on{display:flex}
+#sf-welcome .wrap{width:100%;max-width:520px;text-align:center}
+#sf-welcome .logo{width:64px;height:64px;border-radius:20px;margin:0 auto 14px;display:grid;place-items:center;background:var(--grad);box-shadow:0 0 40px rgba(168,85,247,.5)}
+#sf-welcome h1{margin:0;font-size:26px;letter-spacing:-.3px}
+#sf-welcome h1 b{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+#sf-welcome p.sub{color:var(--muted);margin:6px 0 22px}
+.sf-choice{display:flex;align-items:center;gap:14px;width:100%;text-align:left;padding:16px 18px;margin:0 0 12px;border-radius:16px;border:1px solid var(--border2);background:var(--panel);color:var(--text);cursor:pointer;font:inherit;transition:transform .12s,border-color .15s,box-shadow .15s}
+.sf-choice:hover{border-color:rgba(255,255,255,.3)}
+.sf-choice:active{transform:scale(.98)}
+.sf-choice .ic{flex:none;width:52px;height:52px;border-radius:14px;display:grid;place-items:center}
+.sf-choice .ic svg{width:26px;height:26px}
+.sf-choice b{display:block;font-size:16px;margin-bottom:2px}
+.sf-choice span{color:var(--muted);font-size:13px}
+.sf-choice.rec{border-color:rgba(244,63,94,.55);box-shadow:0 0 0 1px rgba(244,63,94,.25),0 10px 30px rgba(244,63,94,.15)}
+.sf-choice.rec .ic{background:linear-gradient(135deg,#f43f5e,#a855f7)}
+.sf-choice.img .ic{background:linear-gradient(135deg,#22d3ee,#3b82f6)}
+.sf-choice.mix .ic{background:linear-gradient(135deg,#22d3ee,#a855f7)}
+#sf-welcome .skip{background:none;border:0;color:var(--muted);font:inherit;margin-top:6px;padding:10px;cursor:pointer}
+@media (pointer:coarse){ .sf-tabs button{min-height:44px} .sf-btn{min-width:44px;height:44px} #sf-dur{height:44px} }
 #sf-toast{display:none;position:fixed;left:50%;transform:translateX(-50%);bottom:calc(14px + env(safe-area-inset-bottom));background:var(--panel);border:1px solid var(--border2);border-radius:999px;padding:8px 14px;font-size:12.5px;z-index:9000;box-shadow:var(--shadow);max-width:92vw;opacity:0;transition:opacity .2s;pointer-events:none}
 #sf-toast.show{opacity:1}
 </style>
@@ -88,7 +112,8 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
 <body>
 <div id="sf-app">
   <div id="sf-top">
-    <div id="sf-logo"><i><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M3 12h2l2-5 3 10 3-14 3 12 2-3h3"/></svg></i><span>Studio <b>Fusion</b></span></div>
+    <div id="sf-prog" hidden></div>
+    <div id="sf-logo" role="button" tabindex="0" title="Accueil" style="cursor:pointer"><i><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M3 12h2l2-5 3 10 3-14 3 12 2-3h3"/></svg></i><span>Studio <b>Fusion</b></span></div>
     <div class="sf-tabs" id="sf-tabs">
       <button data-mode="image" class="on" title="Retouche d'image"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg>Image</button>
       <button data-mode="audio" title="Studio audio"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4"/></svg>Audio</button>
@@ -99,8 +124,9 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       <button class="sf-btn grad" id="sf-sonify" title="Calque → son : gauche→droite = temps, bas→haut = fréquence, luminosité = volume"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="10" height="14" rx="2"/><path d="M17 9a4 4 0 0 1 0 6M20 6a8 8 0 0 1 0 12"/></svg><span class="t">Sonifier</span></button>
       <input id="sf-dur" type="number" min="1" max="30" step="0.5" value="5" title="Durée du son généré (secondes)">
       <button class="sf-btn grad" id="sf-spectro" title="Clip audio sélectionné → calque spectrogramme"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M3 18V9M7 18V5M11 18v-6M15 18V8M19 18v-4"/><path d="M2 21h20"/></svg><span class="t">Spectrogramme</span></button>
+      <button class="sf-btn" id="sf-cancel" hidden title="Annuler le calcul">Annuler</button>
       <button class="sf-btn" id="sf-helpbtn" title="Aide"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.7M12 17h.01"/></svg></button>
-      <span id="sf-status"></span>
+      <span id="sf-status" role="status" aria-live="polite"></span>
     </div>
   </div>
   <div id="sf-online"><span>🎙️ Le micro est bloqué dans cette page. Pour enregistrer (iPhone compris), ouvrez la version en ligne :</span> <a id="sf-online-link" target="_blank" rel="noopener"></a><button id="sf-online-x" aria-label="Fermer">×</button></div>
@@ -110,7 +136,16 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
   </div>
 </div>
 
-<div id="sf-toast"></div>
+<div id="sf-toast" role="status" aria-live="polite"></div>
+<div id="sf-welcome" role="dialog" aria-modal="true" aria-labelledby="sf-wtitle"><div class="wrap">
+  <div class="logo"><svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M3 12h2l2-5 3 10 3-14 3 12 2-3h3"/></svg></div>
+  <h1 id="sf-wtitle">Studio <b>Fusion</b></h1>
+  <p class="sub">Que veux-tu faire ?</p>
+  <button class="sf-choice rec" data-go="booth"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5M8 22h8"/></svg></span><div><b>Enregistrer ma voix</b><span>Importe ton instru, mets ton casque, appuie sur REC.</span></div></button>
+  <button class="sf-choice img" data-go="image"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></svg></span><div><b>Retoucher une image</b><span>Calques, masques, sélections, réglages.</span></div></button>
+  <button class="sf-choice mix" data-go="split"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 10v4"/></svg></span><div><b>Mélanger image et son</b><span>Transformer une image en son, un son en image.</span></div></button>
+  <button class="skip" data-go="last">Reprendre où j'en étais</button>
+</div></div>
 <div id="sf-help"><div class="box">
   <h2>Studio Fusion</h2>
   <p>Un seul logiciel qui réunit la retouche d'image par calques (inspirée de Photoshop) et l'enregistrement / montage / mixage audio multipiste (inspiré de Pro Tools).</p>
@@ -227,6 +262,14 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
   ];
   const FONTS = ['Arial', 'Georgia', 'Times New Roman', 'Courier New', 'Verdana', 'Impact'];
   const HIST_MAX = 50;
+  const MAX_PIX = 16000000;            // plafond par canevas (iOS ≈ 16,7 Mpx)
+  const MAX_DIM = 20000;               // dimension maximale saisie
+  const TILE = 256;                    // tuiles de capture du pinceau
+  const PREVIEW_MAX = 1024;            // côté max de l'aperçu des réglages
+  const DB_NAME = 'studio-fusion-image', DB_STORE = 'doc', DB_KEY = 'current';
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const HIST_BUDGET = (isIOS || (navigator.deviceMemory && navigator.deviceMemory <= 4)) ? 96e6 : 200e6;
 
   // Réglages : params = curseurs ; immediate = appliqué directement ; curve = éditeur de courbes
   const ADJ = {
@@ -288,15 +331,37 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
   const lum = (r, g, b) => 0.299 * r + 0.587 * g + 0.114 * b;
   const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
 
+  // Erreur levée quand le navigateur ne fournit pas de contexte (canevas trop grand)
+  function memError() {
+    const e = new Error('Mémoire insuffisante pour cette taille.');
+    e.name = 'MemoryError';
+    return e;
+  }
   function makeCanvas(w, h) {
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(1, Math.round(w));
     canvas.height = Math.max(1, Math.round(h));
-    return { canvas, ctx: canvas.getContext('2d', { willReadFrequently: true }) };
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) throw memError();
+    return { canvas, ctx };
   }
 
-  // Marque une surface comme modifiée (invalide le cache de snapshot et de masque)
-  function touch(s) { s.rev = ++revCounter; }
+  // Enveloppe un gestionnaire : une erreur de mémoire devient un message, pas une exception
+  function guarded(fn) {
+    return function guardedCall(...args) {
+      try { return fn.apply(this, args); } catch (e) {
+        if (e && e.name === 'MemoryError') { setStatus(e.message); renderAll(); return undefined; }
+        throw e;
+      }
+    };
+  }
+  function reportError(e) {
+    if (e && e.name === 'MemoryError') setStatus(e.message);
+    else throw e;
+  }
+
+  // Marque une surface comme modifiée ; libère aussi son cache de snapshot, désormais périmé
+  function touch(s) { s.rev = ++revCounter; s._snap = null; }
 
   function makeLayer(name, w, h) {
     const c = makeCanvas(w, h);
@@ -647,33 +712,76 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     return scratch.canvas;
   }
 
-  function drawLayer(ctx, L) {
+  // Résolution de la vue = taille affichée (× densité d'écran, plafonnée) : la composition ne coûte
+  // pas plus que ce qui est vu, même pour un document de 8000 px affiché à 10 %
+  function viewSize() {
+    const k = Math.min(window.devicePixelRatio || 1, 2) * zoom;
+    return {
+      w: Math.max(1, Math.min(doc.w, Math.round(doc.w * k))),
+      h: Math.max(1, Math.min(doc.h, Math.round(doc.h * k))),
+    };
+  }
+  function syncViewSize() {
+    const s = viewSize();
+    if (view.width !== s.w || view.height !== s.h) { view.width = s.w; view.height = s.h; }
+  }
+
+  // Aperçu basse résolution d'un réglage en cours, à dessiner à la place de L (null sinon)
+  function adjCanvasFor(L) {
+    const A = adj;
+    if (!A || !A.pvOut) return null;
+    if (A.surf === L) return A.masked || A.pvOut;
+    if (L.mask && A.surf === L.mask && L.mask.enabled) return A.layerPv;
+    return null;
+  }
+
+  // preview = true : la vue montre l'aperçu ; false : pixels réels (export)
+  function drawLayer(ctx, L, preview) {
     if (!L.visible || L.opacity <= 0) return;
     ctx.globalAlpha = L.opacity;
     ctx.globalCompositeOperation = L.blend;
-    ctx.drawImage(layerSource(L), 0, 0);
+    const pc = preview ? adjCanvasFor(L) : null;
+    const dw = ctx.canvas.width, dh = ctx.canvas.height;
+    if (pc) ctx.drawImage(pc.canvas, 0, 0, dw, dh);
+    else ctx.drawImage(layerSource(L), 0, 0, dw, dh);
   }
 
-  function composeTo(ctx, w, h, bg) {
+  function composeTo(ctx, w, h, bg, preview) {
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
     ctx.clearRect(0, 0, w, h);
     if (bg) { ctx.fillStyle = bg; ctx.fillRect(0, 0, w, h); }
-    for (const L of layers) drawLayer(ctx, L);
+    for (const L of layers) drawLayer(ctx, L, preview);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
   }
 
   function compose() {
     const mv = maskView !== null ? layers.find((l) => l.id === maskView) : null;
+    const vw = view.width, vh = view.height;
     if (mv && mv.mask) {
       vctx.globalAlpha = 1;
       vctx.globalCompositeOperation = 'source-over';
-      vctx.clearRect(0, 0, doc.w, doc.h);
-      vctx.drawImage(mv.mask.canvas, 0, 0);
+      vctx.clearRect(0, 0, vw, vh);
+      if (adj && adj.pvOut && adj.surf === mv.mask) vctx.drawImage(adj.pvOut.canvas, 0, 0, vw, vh);
+      else vctx.drawImage(mv.mask.canvas, 0, 0, vw, vh);
       return;
     }
-    composeTo(vctx, doc.w, doc.h, null);
+    composeTo(vctx, vw, vh, null, true);
+  }
+
+  // Une seule composition par image : les demandes se regroupent dans requestAnimationFrame
+  let frameQueued = false, previewQueued = false;
+  function requestCompose() {
+    if (frameQueued) return;
+    frameQueued = true;
+    requestAnimationFrame(() => {
+      frameQueued = false;
+      try {
+        if (previewQueued) { previewQueued = false; computeAdjPreview(); }
+        compose();
+      } catch (e) { reportError(e); }
+    });
   }
 
   function marching(r, lw) {
@@ -700,6 +808,20 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     octx.lineDashOffset = antsOffset * lw + 4 * lw;
     octx.stroke(P);
     octx.restore();
+  }
+
+  // Pointillés animés : le minuteur ne tourne que lorsqu'un tracé est affiché
+  let antsTimer = null;
+  const antsNeeded = () => !!(selection || cropRect || preview || lasso);
+  function antsTick() {
+    if (!root || root.offsetParent === null || (window.__sfFocus && window.__sfFocus !== 'image')) return;
+    if (!antsNeeded()) { antsSync(); return; }
+    antsOffset = (antsOffset + 1) % 8;
+    drawOverlay();
+  }
+  function antsSync() {
+    if (antsNeeded() && !antsTimer) antsTimer = setInterval(antsTick, 150);
+    else if (!antsNeeded() && antsTimer) { clearInterval(antsTimer); antsTimer = null; }
   }
 
   function paintShape(ctx, s, mode, fg, bg, sw) {
@@ -739,6 +861,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       if (lasso.hover) P.lineTo(lasso.hover.x, lasso.hover.y);
       antsPath(P, lw);
     }
+    antsSync();
   }
 
   function updateOptions() {
@@ -842,13 +965,11 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
   }
 
   function renderAll() {
-    if (view.width !== doc.w || view.height !== doc.h) {
-      view.width = ov.width = doc.w;
-      view.height = ov.height = doc.h;
-    }
+    if (ov.width !== doc.w || ov.height !== doc.h) { ov.width = doc.w; ov.height = doc.h; }
+    syncViewSize();
     wrap.style.width = doc.w * zoom + 'px';
     wrap.style.height = doc.h * zoom + 'px';
-    compose();
+    requestCompose();
     drawOverlay();
     renderLayers();
     renderHistory();
@@ -911,12 +1032,40 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     editTarget = editTarget === 'mask' && active() && active().mask ? 'mask' : 'pixels';
   }
 
+  // Octets distincts référencés par l'historique (tampons dédoublonnés)
+  function histBytesTotal() {
+    const seen = new Set();
+    let total = 0;
+    const add = (img) => {
+      if (!img || !img.data || seen.has(img.data.buffer)) return;
+      seen.add(img.data.buffer);
+      total += img.data.byteLength;
+    };
+    const addOp = (op) => {
+      if (!op) return;
+      if (op.kind === 'pixels') add(op.data);
+      else if (op.kind === 'state') op.state.layers.forEach((l) => { add(l.data); if (l.mask) add(l.mask.data); });
+    };
+    history.forEach((h) => { addOp(h.undo); addOp(h.redo); });
+    return total;
+  }
+
+  // Retire l'entrée la plus ancienne : la suivante devient la base, sans annulation possible
+  function dropOldest() {
+    history.shift();
+    histIdx--;
+    if (history[0]) { history[0].undo = null; history[0].redo = null; }
+  }
+
   function pushEntry(label, undo, redo) {
     history = history.slice(0, histIdx + 1);
     history.push({ label, undo, redo });
-    if (history.length > HIST_MAX) history.shift();
     histIdx = history.length - 1;
+    // Budget dépassé : on purge, mais la dernière opération reste annulable (il reste une base + elle)
+    while (history.length > HIST_MAX ||
+      (histBytesTotal() > HIST_BUDGET && histIdx > 1)) dropOldest();
     renderAll();
+    markDirty();
   }
 
   const pushState = (label, before) =>
@@ -971,6 +1120,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     while (histIdx < j) { histIdx++; applyOp(history[histIdx].redo); }
     lasso = null;
     renderAll();
+    markDirty();
   }
   const undo = () => { if (histIdx > 0) goto(histIdx - 1); };
   const redo = () => { if (histIdx < history.length - 1) goto(histIdx + 1); };
@@ -1225,7 +1375,35 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
   }
 
   // Trace un segment de pinceau/gomme sur la surface S. Renvoie la zone touchée (ou null).
-  function brushSegment(S, a, b, erase, rgb) {
+  // Capture paresseuse : avant de toucher une tuile, on copie son état initial (une fois par trait)
+  function captureTiles(S, R, tiles) {
+    const tx0 = Math.floor(R.x / TILE), tx1 = Math.floor((R.x + R.w - 1) / TILE);
+    const ty0 = Math.floor(R.y / TILE), ty1 = Math.floor((R.y + R.h - 1) / TILE);
+    for (let ty = ty0; ty <= ty1; ty++) {
+      for (let tx = tx0; tx <= tx1; tx++) {
+        const key = tx + ',' + ty;
+        if (tiles.has(key)) continue;
+        const x = tx * TILE, y = ty * TILE;
+        const w = Math.min(TILE, doc.w - x), h = Math.min(TILE, doc.h - y);
+        tiles.set(key, { x, y, w, h, img: S.ctx.getImageData(x, y, w, h) });
+      }
+    }
+  }
+
+  // Copie dans dst (rectangle dr) la part de la tuile t qui chevauche dr
+  function tileInto(dst, dr, t) {
+    const x0 = Math.max(dr.x, t.x), x1 = Math.min(dr.x + dr.w, t.x + t.w);
+    const y0 = Math.max(dr.y, t.y), y1 = Math.min(dr.y + dr.h, t.y + t.h);
+    if (x1 <= x0 || y1 <= y0) return;
+    const n = (x1 - x0) * 4;
+    for (let y = y0; y < y1; y++) {
+      const so = ((y - t.y) * t.w + (x0 - t.x)) * 4;
+      const de = ((y - dr.y) * dr.w + (x0 - dr.x)) * 4;
+      dst.data.set(t.img.data.subarray(so, so + n), de);
+    }
+  }
+
+  function brushSegment(S, a, b, erase, rgb, tiles) {
     const size = opts.size;
     const step = Math.max(1, size * 0.12);
     const n = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / step));
@@ -1233,6 +1411,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     const R = clipRect(Math.min(a.x, b.x) - rad, Math.min(a.y, b.y) - rad,
       Math.max(a.x, b.x) + rad, Math.max(a.y, b.y) + rad);
     if (!R) return null;
+    if (tiles) captureTiles(S, R, tiles);
     const ctx = S.ctx;
     const color = colorArr(S, rgb, erase);
     const before = selection ? ctx.getImageData(R.x, R.y, R.w, R.h) : null;
@@ -1258,8 +1437,10 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     const dr = d.dirty;
     if (!dr) return;
     const S = d.S;
-    const before = cropImage(d.base, dr.x, dr.y, dr.w, dr.h);
+    // Avant = zone courante, corrigée par les tuiles capturées (les autres tuiles n'ont pas bougé)
     const after = S.ctx.getImageData(dr.x, dr.y, dr.w, dr.h);
+    const before = cloneImage(after);
+    d.tiles.forEach((t) => tileInto(before, dr, t));
     const r = diffBBox(before, after);
     if (!r) return;
     pushPatch(d.erase ? 'Gomme' : 'Pinceau', S,
@@ -1339,7 +1520,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
   function pickColor(pt, bgTarget) {
     const x = Math.floor(pt.x), y = Math.floor(pt.y);
     if (x < 0 || y < 0 || x >= doc.w || y >= doc.h) return;
-    const d = vctx.getImageData(x, y, 1, 1).data;
+    const d = vctx.getImageData(Math.floor(x * view.width / doc.w), Math.floor(y * view.height / doc.h), 1, 1).data;
     const hex = '#' + [d[0], d[1], d[2]].map((v) => v.toString(16).padStart(2, '0')).join('');
     if (bgTarget) E.cbg.value = hex; else E.cfg.value = hex;
     setStatus(`Couleur prélevée : ${hex}`);
@@ -1491,9 +1672,9 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       if (!S) return;
       const erase = tool === 'eraser';
       const rgb = hexToRgb(E.cfg.value);
-      drag = { tool: 'brush', erase, S, last: pt, rgb, base: S.ctx.getImageData(0, 0, doc.w, doc.h), dirty: null };
-      drag.dirty = brushSegment(S, pt, pt, erase, rgb);
-      compose();
+      drag = { tool: 'brush', erase, S, last: pt, rgb, tiles: new Map(), dirty: null };
+      drag.dirty = brushSegment(S, pt, pt, erase, rgb, drag.tiles);
+      requestCompose();
       return;
     }
     if (tool === 'rect' || tool === 'ellipse') {
@@ -1515,7 +1696,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       c.globalCompositeOperation = 'source-over';
       c.drawImage(d.flC, d.bb.x + dx, d.bb.y + dy);
       touch(d.S);
-      compose();
+      requestCompose();
     } else if (d.tool === 'select') {
       preview = { type: 'marquee', rect: normRect(d.sx, d.sy, pt.x, pt.y) };
       drawOverlay();
@@ -1524,9 +1705,9 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
       E.cropBtn.disabled = !(cropRect.w > 1 && cropRect.h > 1);
       drawOverlay();
     } else if (d.tool === 'brush') {
-      d.dirty = unionRect(d.dirty, brushSegment(d.S, d.last, pt, d.erase, d.rgb));
+      d.dirty = unionRect(d.dirty, brushSegment(d.S, d.last, pt, d.erase, d.rgb, d.tiles));
       d.last = pt;
-      compose();
+      requestCompose();
     } else if (d.tool === 'rect' || d.tool === 'ellipse') {
       const r = shapeRect(d.sx, d.sy, pt, e.shiftKey);
       preview = { type: 'shape', shape: { type: d.tool, ...r } };
@@ -1828,41 +2009,150 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
 
   function hideAdjBox() { E.adjBox.innerHTML = ''; }
 
-  function livePreview() {
-    if (!adj) return;
-    const p = adj.curve ? { luts: buildLuts(adj.curve) } : adj.params;
-    const out = runAdj(adj.kind, p, adj.src);
-    if (adj.surf.isMask) grayify(out);
-    if (selection) mixSel(adj.src, out, adj.r);
-    adj.surf.ctx.putImageData(out, adj.r.x, adj.r.y);
-    touch(adj.surf);
-    compose();
+  // Paramètres de l'aperçu : rayon et taille de bloc suivent la réduction de l'image
+  function paramsFor(A, full) {
+    const p = A.curve ? { luts: buildLuts(A.curve) } : A.params;
+    if (full) return p;
+    if (A.kind === 'blur') return { radius: p.radius * A.scale };
+    if (A.kind === 'pixel') return { size: Math.max(2, Math.round(p.size * A.scale)) };
+    return p;
   }
 
+  // Mélange par sélection sur des tampons de même taille (sel : 0..255, un octet par pixel)
+  function mixRaw(before, after, sel) {
+    const bd = before.data, ad = after.data;
+    for (let p = 0; p < sel.length; p++) {
+      const s = sel[p];
+      if (s === 255) continue;
+      const i = p * 4;
+      if (s === 0) { ad[i] = bd[i]; ad[i + 1] = bd[i + 1]; ad[i + 2] = bd[i + 2]; ad[i + 3] = bd[i + 3]; }
+      else {
+        const f = s / 255;
+        for (let c = 0; c < 4; c++) ad[i + c] = bd[i + c] + (ad[i + c] - bd[i + c]) * f;
+      }
+    }
+  }
+
+  // Prépare l'aperçu : copie réduite (côté max PREVIEW_MAX) de la surface, de sa sélection et du masque
+  function prepareAdjPreview(A) {
+    const S = A.surf, W = doc.w, H = doc.h;
+    const s = Math.min(1, PREVIEW_MAX / Math.max(W, H));
+    const pw = Math.max(1, Math.round(W * s)), ph = Math.max(1, Math.round(H * s));
+    const low = (src) => {
+      const c = makeCanvas(pw, ph);
+      c.ctx.imageSmoothingQuality = 'high';
+      c.ctx.drawImage(src, 0, 0, pw, ph);
+      return c;
+    };
+    A.scale = pw / W;
+    A.lowSrc = low(S.canvas).ctx.getImageData(0, 0, pw, ph);
+    A.pvOut = makeCanvas(pw, ph);
+    A.pvOut.ctx.putImageData(A.lowSrc, 0, 0);
+    const r = A.r;
+    const lx = Math.floor(r.x * pw / W), ly = Math.floor(r.y * ph / H);
+    const lx2 = Math.min(pw, Math.ceil((r.x + r.w) * pw / W)), ly2 = Math.min(ph, Math.ceil((r.y + r.h) * ph / H));
+    A.lr = { x: lx, y: ly, w: Math.max(1, lx2 - lx), h: Math.max(1, ly2 - ly) };
+    if (selection) {
+      A.lowSel = new Uint8ClampedArray(A.lr.w * A.lr.h);
+      for (let y = 0; y < A.lr.h; y++) {
+        const sy = Math.min(H - 1, Math.floor((A.lr.y + y + 0.5) * H / ph));
+        for (let x = 0; x < A.lr.w; x++) {
+          const sx = Math.min(W - 1, Math.floor((A.lr.x + x + 0.5) * W / pw));
+          A.lowSel[y * A.lr.w + x] = selection.mask[sy * W + sx];
+        }
+      }
+    }
+    const owner = layers.find((l) => l.id === ownerId(S));
+    if (!S.isMask && owner && owner.mask && owner.mask.enabled) {
+      // Masque du calque en alpha réduit : l'aperçu reste masqué comme le rendu réel
+      const md = low(owner.mask.canvas).ctx.getImageData(0, 0, pw, ph).data;
+      const img = new ImageData(pw, ph);
+      for (let i = 0; i < md.length; i += 4) {
+        img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
+        img.data[i + 3] = md[i];
+      }
+      A.lowMask = makeCanvas(pw, ph);
+      A.lowMask.ctx.putImageData(img, 0, 0);
+      A.masked = makeCanvas(pw, ph);
+    }
+    if (S.isMask && owner && owner.mask && owner.mask.enabled) {
+      // Réglage d'un masque : les pixels du calque sont fixes, seule l'alpha change
+      A.lowLayer = low(owner.canvas).ctx.getImageData(0, 0, pw, ph);
+      A.alphaImg = new ImageData(pw, ph);
+      for (let i = 0; i < A.alphaImg.data.length; i += 4) {
+        A.alphaImg.data[i] = A.alphaImg.data[i + 1] = A.alphaImg.data[i + 2] = 255;
+      }
+      A.alphaC = makeCanvas(pw, ph);
+      A.layerPv = makeCanvas(pw, ph);
+    }
+  }
+
+  // Recalcule l'aperçu basse résolution (appelé au plus une fois par image, avec le dernier réglage)
+  function computeAdjPreview() {
+    const A = adj;
+    if (!A || !A.pvOut) return;
+    const S = A.surf, lr = A.lr;
+    const sub = cropImage(A.lowSrc, lr.x, lr.y, lr.w, lr.h);
+    const out = runAdj(A.kind, paramsFor(A, false), sub);
+    if (S.isMask) grayify(out);
+    if (A.lowSel) mixRaw(sub, out, A.lowSel);
+    A.pvOut.ctx.putImageData(out, lr.x, lr.y);
+    if (A.masked) {
+      const m = A.masked.ctx;
+      m.globalCompositeOperation = 'copy';
+      m.drawImage(A.pvOut.canvas, 0, 0);
+      m.globalCompositeOperation = 'destination-in';
+      m.drawImage(A.lowMask.canvas, 0, 0);
+      m.globalCompositeOperation = 'source-over';
+    }
+    if (A.layerPv) {
+      const md = A.pvOut.ctx.getImageData(0, 0, A.pw, A.ph).data;
+      const ad = A.alphaImg.data;
+      for (let i = 0; i < ad.length; i += 4) ad[i + 3] = md[i];
+      A.alphaC.ctx.putImageData(A.alphaImg, 0, 0);
+      const lp = A.layerPv.ctx;
+      lp.putImageData(A.lowLayer, 0, 0);
+      lp.globalCompositeOperation = 'destination-in';
+      lp.drawImage(A.alphaC.canvas, 0, 0);
+      lp.globalCompositeOperation = 'source-over';
+    }
+  }
+
+  // Demande un aperçu : le calcul et la composition ont lieu à la prochaine image
+  function livePreview() {
+    if (!adj) return;
+    previewQueued = true;
+    requestCompose();
+  }
+
+  // Annule : la surface n'a jamais été modifiée pendant l'aperçu, rien à restaurer
   function cancelAdj() {
     if (!adj) return;
-    adj.surf.ctx.putImageData(adj.src, adj.r.x, adj.r.y);
-    touch(adj.surf);
     adj = null;
+    previewQueued = false;
     hideAdjBox();
     renderAll();
   }
 
-  // Valide le réglage : un patch limité aux pixels réellement changés
+  // Valide le réglage à pleine résolution, une seule fois ; patch limité aux pixels changés
   function applyAdj() {
     if (!adj) return;
     const A = adj;
     adj = null;
+    previewQueued = false;
     hideAdjBox();
-    const cur = A.surf.ctx.getImageData(A.r.x, A.r.y, A.r.w, A.r.h);
-    const r = diffBBox(A.src, cur);
-    if (r) {
-      pushPatch(ADJ[A.kind].label, A.surf,
-        { x: A.r.x + r.x, y: A.r.y + r.y, w: r.w, h: r.h },
-        cropImage(A.src, r.x, r.y, r.w, r.h), cropImage(cur, r.x, r.y, r.w, r.h));
-    } else {
-      renderAll();
-    }
+    const S = A.surf, r = A.r;
+    const before = S.ctx.getImageData(r.x, r.y, r.w, r.h);
+    const out = runAdj(A.kind, paramsFor(A, true), before);
+    if (S.isMask) grayify(out);
+    if (selection) mixSel(before, out, r);
+    const rr = diffBBox(before, out);
+    if (!rr) { renderAll(); return; }
+    const abs = { x: r.x + rr.x, y: r.y + rr.y, w: rr.w, h: rr.h };
+    const after = cropImage(out, rr.x, rr.y, rr.w, rr.h);
+    S.ctx.putImageData(after, abs.x, abs.y);
+    touch(S);
+    pushPatch(ADJ[A.kind].label, S, abs, cropImage(before, rr.x, rr.y, rr.w, rr.h), after);
   }
 
   function showAdjControls(def) {
@@ -2037,20 +2327,16 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     const def = ADJ[kind];
     const S = editSurface();
     if (!S || !def) return;
-    const r = regionRect();
     const params = {};
     def.params.forEach((p) => { params[p.k] = p.v; });
     adj = {
-      kind, surf: S, r, params,
-      src: S.ctx.getImageData(r.x, r.y, r.w, r.h),
+      kind, surf: S, r: regionRect(), params, scale: 1,
+      pvOut: null, masked: null, layerPv: null, lowSel: null,
       curve: def.curve ? { rgb: [[0, 0], [255, 255]], r: [[0, 0], [255, 255]], g: [[0, 0], [255, 255]], b: [[0, 0], [255, 255]] } : null,
       ch: 'rgb',
     };
-    if (def.immediate) {
-      livePreview();
-      applyAdj();
-      return;
-    }
+    if (def.immediate) { applyAdj(); return; }
+    prepareAdjPreview(adj);
     if (def.curve) showCurvesEditor();
     else showAdjControls(def);
     livePreview();
@@ -2072,27 +2358,63 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     return c.ctx.getImageData(0, 0, c.canvas.width, c.canvas.height);
   }
 
+  // Taille réduite proportionnellement au plafond de pixels
+  function reduceDims(w, h) {
+    const s = Math.sqrt(MAX_PIX / (w * h));
+    return { w: Math.max(1, Math.floor(w * s)), h: Math.max(1, Math.floor(h * s)) };
+  }
+
+  // Bandeau proposant de réduire une image trop grande (ou d'annuler)
+  function askReduce(w, h, onReduce) {
+    const r = reduceDims(w, h);
+    const mpx = (w * h / 1e6).toFixed(1).replace('.', ',');
+    setBanner(`Image trop grande pour cet appareil : ${w} × ${h} px (${mpx} Mpx, limite 16 Mpx).`, [
+      { label: `Réduire à ${r.w} × ${r.h}`, icon: 'fit', cls: 'ie-primary', fn: () => { hideBanner(); onReduce(r.w, r.h); } },
+      { label: 'Annuler', icon: 'x', fn: () => hideBanner() },
+    ]);
+  }
+
+  // Nouveau document : tout ce qui peut échouer (mémoire) est fait avant de changer l'état
+  function createBlank(w, h) {
+    const list = [makeWhite(w, h)];
+    freshStart();
+    resetDocument(w, h, list);
+    markDirty();
+  }
+
   function newDocument() {
-    const w = clampInt(E.nw.value, 1, 8000, 1200);
-    const h = clampInt(E.nh.value, 1, 8000, 800);
-    resetDocument(w, h, [makeWhite(w, h)]);
+    const w = clampInt(E.nw.value, 1, MAX_DIM, 1200);
+    const h = clampInt(E.nh.value, 1, MAX_DIM, 800);
+    if (w * h > MAX_PIX) {
+      askReduce(w, h, (rw, rh) => { E.nw.value = rw; E.nh.value = rh; createBlank(rw, rh); });
+      return;
+    }
+    createBlank(w, h);
+  }
+
+  function placeImage(img, w, h, name) {
+    const L = makeLayer('Image', w, h);
+    L.ctx.imageSmoothingQuality = 'high';
+    L.ctx.drawImage(img, 0, 0, w, h);
+    touch(L);
+    freshStart();
+    resetDocument(w, h, [L]);
+    markDirty();
+    setStatus(`Image ouverte : ${name}`);
   }
 
   function openFile(file) {
-    loadImage(file, (img) => {
+    loadImage(file, guarded((img) => {
       const w = img.naturalWidth, h = img.naturalHeight;
-      const L = makeLayer('Image', w, h);
-      L.ctx.drawImage(img, 0, 0);
-      touch(L);
-      resetDocument(w, h, [L]);
-      setStatus(`Image ouverte : ${file.name}`);
-    });
+      if (w * h > MAX_PIX) { askReduce(w, h, (rw, rh) => placeImage(img, rw, rh, file.name)); return; }
+      placeImage(img, w, h, file.name);
+    }));
   }
 
   function exportImage(kind) {
     const jpeg = kind === 'jpeg';
     const c = makeCanvas(doc.w, doc.h);
-    composeTo(c.ctx, doc.w, doc.h, jpeg ? '#ffffff' : null);
+    composeTo(c.ctx, doc.w, doc.h, jpeg ? '#ffffff' : null, false);
     c.canvas.toBlob((blob) => {
       if (!blob) { setStatus('Export impossible.'); return; }
       const name = jpeg ? 'image.jpg' : 'image.png';
@@ -2232,7 +2554,7 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     const d = drag;
     drag = null;
     if (!d) return;
-    if (d.tool === 'brush') { if (d.dirty) { d.S.ctx.putImageData(d.base, 0, 0); touch(d.S); } }
+    if (d.tool === 'brush') { if (d.dirty) { d.tiles.forEach((t) => d.S.ctx.putImageData(t.img, t.x, t.y)); touch(d.S); } }
     else if (d.tool === 'move' && d.moved) { d.S.ctx.putImageData(d.base, 0, 0); touch(d.S); }
     else if (d.tool === 'crop') cropRect = null;
     preview = null;
@@ -2314,6 +2636,254 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
     if (touches.size === 0) touchLock = false;
   }
 
+  // ---------- Bandeau (reprise, réduction de taille) ----------
+  let restoreRec = null, pendingRestore = false;
+
+  // Affiche un message et des boutons dans le bandeau ; buttons : [{label, icon, cls, fn}]
+  function setBanner(msg, buttons) {
+    E.banner.innerHTML = '';
+    const t = document.createElement('span');
+    t.className = 'ie-banner-txt';
+    t.textContent = msg;
+    const b = document.createElement('span');
+    b.className = 'ie-banner-btns';
+    buttons.forEach((def) => {
+      const btn = document.createElement('button');
+      btn.className = 'ie-btn' + (def.cls ? ' ' + def.cls : '');
+      btn.innerHTML = icon(def.icon) + '<span></span>';
+      btn.querySelector('span').textContent = def.label;
+      btn.addEventListener('click', def.fn);
+      b.appendChild(btn);
+    });
+    E.banner.append(t, b);
+    E.banner.hidden = false;
+  }
+
+  // Ferme le bandeau ; tant qu'une reprise attend une réponse, le choix de reprise reste affiché
+  function hideBanner() {
+    if (pendingRestore) { renderRestorePrompt(); return; }
+    E.banner.hidden = true;
+    E.banner.innerHTML = '';
+  }
+
+  function renderRestorePrompt() {
+    const rec = restoreRec;
+    if (!rec) return;
+    const n = rec.layers.length;
+    const when = new Date(rec.savedAt).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    setBanner(`Reprendre ton image du ${when} (${n} calque${n > 1 ? 's' : ''}) ?`, [
+      { label: 'Reprendre', icon: 'check', cls: 'ie-primary', fn: () => resumeRestore() },
+      { label: 'Nouvelle image', icon: 'filenew', fn: () => renderRestoreConfirm() },
+    ]);
+  }
+
+  function renderRestoreConfirm() {
+    setBanner('Supprimer la sauvegarde et repartir d\'une image vide ?', [
+      { label: 'Confirmer', icon: 'trash', cls: 'ie-primary', fn: () => confirmNew() },
+      { label: 'Annuler', icon: 'x', fn: () => renderRestorePrompt() },
+    ]);
+  }
+
+  // ---------- Sauvegarde automatique (IndexedDB) et reprise ----------
+  let saveEnabled = false, saveTimer = null, saveBusy = false, saveQueued = false, dbPromise = null;
+  const hhmm = (t) => new Date(t).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+
+  function setSaveMsg(text, cls) {
+    E.save.textContent = text;
+    E.save.className = 'ie-save' + (cls ? ' ' + cls : '');
+  }
+
+  function saveErrorText(err) {
+    if (err && err.code === 'open') return 'Sauvegarde indisponible dans ce navigateur (navigation privée ?).';
+    if (err && err.name === 'QuotaExceededError') return 'Stockage plein : la sauvegarde a échoué.';
+    return 'Sauvegarde impossible : ' + ((err && err.message) || 'erreur inconnue') + '.';
+  }
+
+  function openDB() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise((resolve, reject) => {
+      const fail = (why) => reject(Object.assign(new Error(why), { code: 'open' }));
+      if (!window.indexedDB) { fail('no-idb'); return; }
+      let req;
+      try { req = indexedDB.open(DB_NAME, 1); } catch (e) { fail(String(e)); return; }
+      req.onupgradeneeded = () => req.result.createObjectStore(DB_STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => fail('open-error');
+      req.onblocked = () => fail('blocked');
+    });
+    dbPromise.catch(() => { dbPromise = null; });
+    return dbPromise;
+  }
+
+  // Une transaction sur le magasin ; make(store) renvoie la requête dont le résultat est rendu
+  function idbRun(mode, make) {
+    return openDB().then((db) => new Promise((resolve, reject) => {
+      const tx = db.transaction(DB_STORE, mode);
+      const req = make(tx.objectStore(DB_STORE));
+      let result;
+      if (req) req.onsuccess = () => { result = req.result; };
+      tx.oncomplete = () => resolve(result);
+      tx.onerror = () => reject(tx.error || new Error('transaction'));
+      tx.onabort = () => reject(tx.error || new Error('transaction annulée'));
+    }));
+  }
+
+  function canvasPng(canvas) {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('encodage PNG impossible'))), 'image/png');
+    });
+  }
+
+  // Les copies des canevas sont demandées dans le même instant (cohérence), puis attendues
+  function buildRecord() {
+    const w = doc.w, h = doc.h, act = activeId, savedAt = Date.now();
+    const parts = layers.map((L) => ({
+      id: L.id, name: L.name, visible: L.visible, opacity: L.opacity, blend: L.blend,
+      pix: canvasPng(L.canvas),
+      mask: L.mask ? { enabled: L.mask.enabled, png: canvasPng(L.mask.canvas) } : null,
+    }));
+    return Promise.all(parts.map(async (p) => ({
+      id: p.id, name: p.name, visible: p.visible, opacity: p.opacity, blend: p.blend,
+      pix: await p.pix,
+      mask: p.mask ? { enabled: p.mask.enabled, png: await p.mask.png } : null,
+    }))).then((ls) => ({ version: 1, w, h, savedAt, activeId: act, layers: ls }));
+  }
+
+  // Sauvegarde 2 s après la dernière modification (le geste en cours est attendu)
+  function markDirty() {
+    if (!saveEnabled) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => { saveTimer = null; runSave(); }, 2000);
+  }
+
+  function flushSave() {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    return runSave();
+  }
+
+  function runSave() {
+    if (!saveEnabled || pendingRestore) return Promise.resolve(false);
+    if (drag) {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => { saveTimer = null; runSave(); }, 500);
+      return Promise.resolve(false);
+    }
+    if (saveBusy) { saveQueued = true; return Promise.resolve(false); }
+    saveBusy = true;
+    setSaveMsg('Enregistrement…', '');
+    return buildRecord()
+      .then((rec) => idbRun('readwrite', (st) => st.put(rec, DB_KEY)).then(() => rec))
+      .then((rec) => { setSaveMsg(`Sauvegardé ✓ ${hhmm(rec.savedAt)}`, 'ok'); return true; })
+      .catch((err) => {
+        if (err && err.code === 'open') saveEnabled = false;
+        setSaveMsg(saveErrorText(err), 'warn');
+        return false;
+      })
+      .finally(() => {
+        saveBusy = false;
+        if (saveQueued) { saveQueued = false; markDirty(); }
+      });
+  }
+
+  // Ne pas écraser une sauvegarde : tant que la reprise n'a pas été tranchée, rien n'est écrit
+  function freshStart() {
+    pendingRestore = false;
+    restoreRec = null;
+    saveEnabled = true;
+    hideBanner();
+  }
+
+  function validSize(w, h) {
+    return Number.isInteger(w) && Number.isInteger(h) && w > 0 && h > 0 &&
+      w <= MAX_DIM && h <= MAX_DIM && w * h <= MAX_PIX;
+  }
+
+  async function startAutosave() {
+    let rec = null;
+    try {
+      rec = await idbRun('readonly', (st) => st.get(DB_KEY));
+    } catch (err) {
+      saveEnabled = false;
+      setSaveMsg(saveErrorText(err), 'warn');
+      return;
+    }
+    if (rec && Array.isArray(rec.layers) && rec.layers.length && validSize(rec.w, rec.h)) {
+      restoreRec = rec;
+      pendingRestore = true;
+      renderRestorePrompt();
+    } else {
+      saveEnabled = true;
+    }
+  }
+
+  async function drawPng(ctx, blob, w, h) {
+    const bmp = await createImageBitmap(blob);
+    ctx.globalCompositeOperation = 'copy';
+    ctx.drawImage(bmp, 0, 0, w, h);
+    ctx.globalCompositeOperation = 'source-over';
+    bmp.close();
+  }
+
+  // Remplace le document par la liste de calques (appelé une fois tout chargé)
+  function applyLoaded(w, h, list, actId) {
+    cancelAdj();
+    doc.w = w; doc.h = h;
+    layers = list;
+    activeId = list.some((l) => l.id === actId) ? actId : list[list.length - 1].id;
+    layerCount = Math.max(layerCount, list.length);
+    editTarget = 'pixels'; maskView = null;
+    selection = null; cropRect = null; preview = null; lasso = null;
+    history = [{ label: 'Reprise', undo: null, redo: null }];
+    histIdx = 0;
+    fitZoom();
+  }
+
+  async function loadRecord(rec) {
+    const w = rec.w, h = rec.h, list = [];
+    let maxId = 0;
+    for (const s of rec.layers) {
+      const L = makeLayer(s.name, w, h);
+      await drawPng(L.ctx, s.pix, w, h);
+      L.id = s.id;
+      L.visible = !!s.visible;
+      L.opacity = clamp(+s.opacity, 0, 1);
+      L.blend = BLENDS.some(([v]) => v === s.blend) ? s.blend : 'normal';
+      if (s.mask) {
+        L.mask = makeMask(L.id, w, h, 0);
+        await drawPng(L.mask.ctx, s.mask.png, w, h);
+        L.mask.enabled = !!s.mask.enabled;
+        touch(L.mask);
+      }
+      touch(L);
+      list.push(L);
+      maxId = Math.max(maxId, s.id);
+    }
+    nextId = Math.max(nextId, maxId + 1);
+    applyLoaded(w, h, list, rec.activeId);
+  }
+
+  function resumeRestore() {
+    const rec = restoreRec;
+    setBanner('Reprise de ton image…', []);
+    loadRecord(rec).then(() => {
+      pendingRestore = false; restoreRec = null; saveEnabled = true;
+      hideBanner();
+      setSaveMsg('Image reprise.', 'ok');
+    }, (err) => {
+      pendingRestore = false; restoreRec = null; saveEnabled = true;
+      hideBanner();
+      setSaveMsg('Reprise impossible : ' + ((err && err.message) || 'erreur') + ' Nouvelle image.', 'warn');
+    });
+  }
+
+  function confirmNew() {
+    idbRun('readwrite', (st) => st.delete(DB_KEY)).then(() => {}, () => {}).then(() => {
+      createBlank(1200, 800);
+      setSaveMsg('Nouvelle image.', '');
+    });
+  }
+
   // ---------- Construction ----------
   function injectStyle() {
     if (document.getElementById('ie-style')) return;
@@ -2357,6 +2927,14 @@ html,body{margin:0;height:100%;color:var(--text);font:13px/1.4 var(--font);overf
 .ie-zoombar [data-zoom]{min-width:52px;text-align:center;font-family:var(--mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-variant-numeric:tabular-nums}
 .ie-info{margin-left:auto;color:var(--muted,#9d95b8);font-family:var(--mono,ui-monospace,monospace);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .ie-status{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--accent,#22d3ee)}
+.ie-save{flex:none;font-family:var(--mono,ui-monospace,monospace);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--muted,#9d95b8)}
+.ie-save.ok{color:var(--ok,#34d399)}
+.ie-save.warn{color:var(--warn,#fbbf24)}
+.ie-banner{flex:none;display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 10px 0;padding:8px 10px;border-radius:var(--radius,12px);background:var(--panel2,#241e38);border:1px solid rgba(251,191,36,.45);box-shadow:0 0 18px rgba(251,191,36,.16);font-size:12px}
+.ie-banner[hidden]{display:none!important}
+.ie-banner-txt{flex:1 1 220px;min-width:0}
+.ie-banner-btns{display:flex;gap:6px;flex-wrap:wrap}
+.ie-banner .ie-btn.ie-primary{background:linear-gradient(135deg,#fbbf24,#f59e0b);color:#1c1302}
 .ie-right{order:3;flex:none;width:280px;display:flex;flex-direction:column;min-height:0;overflow:hidden;border-radius:var(--radius,12px);background:var(--panel,rgba(28,24,44,.86));backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid var(--border,rgba(255,255,255,.08));box-shadow:var(--shadow,0 8px 30px rgba(0,0,0,.45))}
 .ie-sheet-h,.ie-sheet-tabs{display:none}
 .ie-sheet-body{flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto}
@@ -2424,23 +3002,34 @@ select.ie-in{width:auto}
 .ie-root input[type=checkbox]{accent-color:var(--accent,#22d3ee)}
 .ie-opt input[type=range]{width:110px}
 @media (pointer:coarse){
-  .ie-btn{height:42px}
-  .ie-tool{width:42px;height:42px}
-  .ie-root input[type=range]{height:34px}
+  .ie-btn{height:44px;min-width:44px}
+  .ie-tool{width:44px;height:44px}
+  .ie-root input[type=range]{height:44px}
   .ie-root input[type=range]::-webkit-slider-thumb{width:24px;height:24px;margin-top:-10px}
   .ie-root input[type=range]::-moz-range-thumb{width:24px;height:24px}
-  .ie-eye{width:40px;height:40px}
-  .ie-lyr{min-height:50px}
-  .ie-hi{padding-top:10px;padding-bottom:10px}
+  .ie-eye{width:44px;height:44px}
+  .ie-lyr{min-height:52px}
+  .ie-hi{padding-top:14px;padding-bottom:14px}
+  .ie-colors{width:44px;height:96px;margin-top:8px}
+  .ie-cfg,.ie-cbg{width:44px;height:44px}
+  .ie-cfg{left:0;top:0}
+  .ie-cbg{right:0;bottom:0}
+  .ie-swap{width:26px;height:26px;left:50%;top:48px;right:auto;transform:translate(-50%,-50%)}
+  .ie-swap .ie-ico{width:14px;height:14px}
+  .ie-swap::before{content:'';position:absolute;left:50%;top:50%;width:44px;height:44px;transform:translate(-50%,-50%)}
+  .ie-top .ie-iconbtn{width:44px;height:44px}
 }
 @media (max-width:820px){
   .ie-body{flex-direction:column;gap:0;padding:0}
   .ie-center{order:1;flex:1 1 0;padding:8px 8px 0}
   .ie-tools{order:2;flex:none;width:auto;height:auto;flex-direction:row;justify-content:flex-start;align-items:center;gap:6px;margin:8px 8px 0;padding:6px 8px;border-radius:16px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}
   .ie-tools::-webkit-scrollbar{display:none}
-  .ie-tool{width:42px;height:42px;scroll-snap-align:start}
-  .ie-colors{flex:none;width:44px;height:42px;margin:0 0 0 2px}
-  .ie-swap{top:-4px;right:-6px}
+  .ie-tool{width:44px;height:44px;scroll-snap-align:start}
+  .ie-colors{flex:none;display:flex;align-items:center;gap:4px;width:auto;height:44px;margin:0 0 0 2px}
+  .ie-cfg,.ie-cbg{position:static;width:44px;height:44px}
+  .ie-swap{position:relative;left:auto;top:auto;right:auto;transform:none;width:44px;height:44px}
+  .ie-swap::before{display:none}
+  .ie-banner{margin:8px 8px 0}
   .ie-right{order:3;flex:none;width:auto;margin:0;border-radius:18px 18px 0 0;border-width:1px 0 0 0;box-shadow:0 -12px 30px rgba(0,0,0,.4);padding-bottom:env(safe-area-inset-bottom,0px)}
   .ie-sheet-h{display:block;flex:none;width:40px;height:4px;margin:8px auto 0;border-radius:4px;background:var(--border2,rgba(255,255,255,.16))}
   .ie-sheet-tabs{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;flex:none;padding:8px 8px 10px}
@@ -2454,11 +3043,11 @@ select.ie-in{width:auto}
   .ie-sec{border-bottom:0}
   .ie-top{margin:0;border-radius:0;border-width:0 0 1px 0;box-shadow:none;padding:6px 8px;gap:6px;flex:none}
   .ie-top .ie-menubtn,.ie-top .ie-undo{display:inline-flex}
-  .ie-top .ie-iconbtn{width:40px;height:40px;padding:0}
+  .ie-top .ie-iconbtn{width:44px;height:44px;padding:0}
   .ie-filebar{display:none}
   .ie-root[data-menu=open] .ie-filebar{display:flex;position:absolute;top:calc(100% + 4px);left:8px;z-index:40;flex-direction:column;align-items:stretch;gap:8px;width:min(320px,calc(100vw - 16px));padding:10px;border-radius:14px;background:var(--panel2,#241e38);border:1px solid var(--border2,rgba(255,255,255,.16));box-shadow:var(--shadow,0 8px 30px rgba(0,0,0,.45))}
   .ie-filebar .ie-group{flex-direction:column;align-items:stretch;gap:6px}
-  .ie-filebar .ie-btn{width:100%;justify-content:flex-start;height:40px}
+  .ie-filebar .ie-btn{width:100%;justify-content:flex-start;height:44px}
   .ie-filebar .ie-sep{display:none}
   .ie-filebar .ie-in.ie-num{width:auto;flex:1}
   .ie-optbar{flex:1 1 100%;width:100%;flex-wrap:nowrap;gap:14px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;scroll-snap-type:x proximity;padding:2px 0 0}
@@ -2467,24 +3056,24 @@ select.ie-in{width:auto}
   .ie-optbar [data-hint]{display:none}
   .ie-stage{overflow:hidden;touch-action:none;border-radius:14px}
   .ie-zoombar{margin-top:8px;gap:6px;padding:4px 6px}
-  .ie-zoombar .ie-btn{width:42px;padding:0}
+  .ie-zoombar .ie-btn{width:44px;padding:0}
   .ie-info{display:none}
   .ie-lbl{display:none}
   .ie-filebar .ie-lbl,.ie-adjbtn .ie-lbl,.ie-mbar .ie-lbl{display:inline}
   .ie-adj-grid{gap:8px;padding:6px 10px 12px}
-  .ie-adjbtn{height:42px}
+  .ie-adjbtn{height:44px}
   .ie-adj-ctl{padding:10px}
   .ie-slider{grid-template-columns:80px 1fr 44px}
   .ie-lyr-top{padding:10px 10px 6px}
   .ie-lyr-list{max-height:30vh;padding:4px 10px 6px}
   .ie-lyr{min-height:52px}
   .ie-thumb{width:44px;height:33px}
-  .ie-eye{width:40px;height:40px}
+  .ie-eye{width:44px;height:44px}
   .ie-mbar{display:flex;flex-wrap:wrap;gap:8px;padding:10px 10px 4px}
-  .ie-mbar>.ie-btn{flex:1 1 calc(50% - 4px);white-space:normal;text-align:center;min-height:42px;line-height:1.2}
+  .ie-mbar>.ie-btn{flex:1 1 calc(50% - 4px);white-space:normal;text-align:center;min-height:44px;line-height:1.2}
   .ie-mbar .ie-seg{flex:1 1 100%}
-  .ie-lyr-btns{display:grid;grid-template-columns:repeat(8,40px);justify-content:center;gap:6px;padding:10px}
-  .ie-lyr-btns .ie-btn{width:40px;height:40px;padding:0}
+  .ie-lyr-btns{display:grid;grid-template-columns:repeat(auto-fill,minmax(44px,1fr));justify-items:center;gap:6px;padding:10px}
+  .ie-lyr-btns .ie-btn{width:44px;height:44px;padding:0}
   .ie-hint-d{display:none}
   .ie-hist{max-height:none}
   .ie-in{font-size:16px}
@@ -2513,9 +3102,9 @@ select.ie-in{width:auto}
     <div class="ie-group">
       ${fbtn('new', 'filenew', 'Nouveau')}
       <div class="ie-size">
-        <input class="ie-in ie-num" type="number" min="1" max="8000" value="1200" data-num="w" title="Largeur (px)" aria-label="Largeur (px)">
+        <input class="ie-in ie-num" type="number" min="1" max="20000" value="1200" data-num="w" title="Largeur (px)" aria-label="Largeur (px)">
         <span class="ie-x">×</span>
-        <input class="ie-in ie-num" type="number" min="1" max="8000" value="800" data-num="h" title="Hauteur (px)" aria-label="Hauteur (px)">
+        <input class="ie-in ie-num" type="number" min="1" max="20000" value="800" data-num="h" title="Hauteur (px)" aria-label="Hauteur (px)">
       </div>
       ${fbtn('open', 'folder', 'Ouvrir image')}
       ${fbtn('import', 'upload', 'Importer comme calque')}
@@ -2547,6 +3136,7 @@ select.ie-in{width:auto}
     <span class="ie-hint" data-hint></span>
   </div>
 </div>
+<div class="ie-banner" hidden></div>
 <div class="ie-body">
   <div class="ie-tools">
     ${tools}
@@ -2568,7 +3158,8 @@ select.ie-in{width:auto}
       <span data-zoom>100%</span>
       <button class="ie-btn" data-act="zin" title="Zoom avant" aria-label="Zoom avant">${icon('zoomIn')}</button>
       <button class="ie-btn" data-act="fit" title="Ajuster à la fenêtre" aria-label="Ajuster à la fenêtre">${icon('fit')}<span class="ie-lbl">Ajuster</span></button>
-      <span class="ie-status" data-status></span>
+      <span class="ie-status" data-status role="status" aria-live="polite"></span>
+      <span class="ie-save" data-save></span>
       <span class="ie-info" data-info></span>
     </div>
   </div>
@@ -2647,10 +3238,11 @@ select.ie-in{width:auto}
       mToggle: q('[data-lact=maskToggle]'), mView: q('[data-lact=maskView]'),
       edPix: q('[data-lact=editPixels]'), edMask: q('[data-lact=editMask]'),
       nw: q('[data-num=w]'), nh: q('[data-num=h]'),
+      banner: q('.ie-banner'), save: q('[data-save]'),
     };
 
     // Barre d'outils, actions, calques, réglages, historique (délégation)
-    root.addEventListener('click', (e) => {
+    root.addEventListener('click', guarded((e) => {
       const b = e.target.closest('button');
       if (b && root.contains(b)) {
         if (b.hasAttribute('data-menu-toggle')) { root.dataset.menu = root.dataset.menu === 'open' ? '' : 'open'; return undefined; }
@@ -2668,7 +3260,7 @@ select.ie-in{width:auto}
       const hi = e.target.closest('.ie-hi');
       if (hi) return goto(+hi.dataset.idx);
       return undefined;
-    });
+    }));
     E.lyrList.addEventListener('dblclick', (e) => {
       const n = e.target.closest('.ie-lname');
       if (n) renameLayer(+n.closest('.ie-lyr').dataset.id, n);
@@ -2684,7 +3276,7 @@ select.ie-in{width:auto}
       if (opStart === null) opStart = L.opacity;
       L.opacity = +E.opacity.value / 100;
       E.opacityVal.textContent = E.opacity.value + '%';
-      compose();
+      requestCompose();
     });
     E.opacity.addEventListener('change', () => {
       const L = active();
@@ -2719,7 +3311,7 @@ select.ie-in{width:auto}
     q('[data-file=import]').addEventListener('change', (e) => {
       const f = e.target.files[0];
       e.target.value = '';
-      if (f) loadImage(f, (img) => addLayerFromImageData(imageToImageData(img), f.name.replace(/\.[^.]+$/, '')));
+      if (f) loadImage(f, guarded((img) => addLayerFromImageData(imageToImageData(img), f.name.replace(/\.[^.]+$/, ''))));
     });
 
     // Texte : Entrée applique le texte
@@ -2728,10 +3320,10 @@ select.ie-in{width:auto}
     });
 
     // Pointeurs : souris/stylet sur le document ; doigts = outil (un doigt) ou geste (deux doigts)
-    stage.addEventListener('pointerdown', ptrDown);
-    stage.addEventListener('pointermove', ptrMove);
-    stage.addEventListener('pointerup', ptrUp);
-    stage.addEventListener('pointercancel', ptrUp);
+    stage.addEventListener('pointerdown', guarded(ptrDown));
+    stage.addEventListener('pointermove', guarded(ptrMove));
+    stage.addEventListener('pointerup', guarded(ptrUp));
+    stage.addEventListener('pointercancel', guarded(ptrUp));
     // Toucher ailleurs ferme le menu « fichier »
     root.addEventListener('pointerdown', (e) => {
       if (root.dataset.menu === 'open' && !e.target.closest('.ie-top')) root.dataset.menu = '';
@@ -2745,20 +3337,17 @@ select.ie-in{width:auto}
     }, { passive: false });
 
     if (!keysBound) {
-      window.addEventListener('keydown', onKey);
+      window.addEventListener('keydown', guarded(onKey));
       keysBound = true;
     }
-    // Animation des pointillés de sélection
-    setInterval(() => {
-      if (!root || root.offsetParent === null || (window.__sfFocus && window.__sfFocus !== 'image')) return;
-      if (selection || cropRect || preview || lasso) {
-        antsOffset = (antsOffset + 1) % 8;
-        drawOverlay();
-      }
-    }, 150);
+    // Enregistrement à la mise en arrière-plan de l'onglet
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') flushSave();
+    });
 
     resetDocument(1200, 800, [makeWhite(1200, 800)]);
     requestAnimationFrame(fitZoom);
+    startAutosave();
   }
 
   // ---------- API publique ----------
@@ -2771,8 +3360,12 @@ select.ie-in{width:auto}
       return L ? L.ctx.getImageData(0, 0, doc.w, doc.h) : null;
     },
     getCanvasSize() { return { width: doc.w, height: doc.h }; },
+    // Enregistre tout de suite (promesse : true si la sauvegarde a réussi)
+    saveNow() { return flushSave(); },
     // Hook de test non documenté
     _debug: {
+      // Test seulement : crée un document sans le plafond de taille (mesures à 8000 × 8000)
+      resetUnchecked(w, h) { resetDocument(w, h, [makeWhite(w, h)]); },
       selectionCount() {
         if (!selection) return 0;
         let n = 0;
@@ -2912,7 +3505,10 @@ select.ie-in{width:auto}
     masterDb: 0, exporting: false, resuming: false,
     undo: [], redo: [], last: null, lastSer: '', histTimer: null, histLabel: '',
     stripOpen: false, spot: null, narrow: false, sheet: false, redraw: false, anchor: null,
-    mic: { dev: '', voice: false, latency: 0, countIn: 0, monitor: false, monDb: 0, instru: 100 }
+    mic: { dev: '', voice: false, latency: 0, countIn: 0, monitor: false, monDb: 0, instru: 100 },
+    takes: [], // prises (buffer + paramètres) ; une prise active possède un clip dont takeId vaut son id
+    booth: { hp: null, micErr: false, count: true, start: 'zero', lastId: null, acap: false, prev: null, prevId: null },
+    sess: { pending: false, ok: true, found: null, saved: {}, bufs: [], lastKey: '', seq: 0, busy: null, again: false, t: null }
   };
   // Moteur d'enregistrement : flux micro, chaîne de capture, prise en cours, calibrage
   var rx = {
@@ -2925,6 +3521,8 @@ select.ie-in{width:auto}
   };
   var stripCache = null;
   var touchPts = {}, pinch = null;
+  var pBuf = new WeakMap(); // buffer -> clé de sauvegarde ; wake = verrou d'écran pendant une prise
+  var wake = null;
 
   // ---------- Utilitaires ----------
   function uid(p) { return p + (st.nextId++); }
@@ -2963,6 +3561,7 @@ select.ie-in{width:auto}
   function trackById(id) { for (var i = 0; i < st.tracks.length; i++) if (st.tracks[i].id === id) return st.tracks[i]; return null; }
   function findClip(id) { var r = st.clips.filter(function (c) { return c.id === id; }); return r[0] || null; }
   function setStatus(msg, err) {
+    if (st.ui.bStatus) { st.ui.bStatus.textContent = msg || ''; st.ui.bStatus.className = 'as-bmsg' + (err ? ' as-err' : ''); }
     if (!st.ui.status) return;
     st.ui.status.textContent = msg || '';
     st.ui.status.className = 'as-status' + (err ? ' as-err' : '');
@@ -3026,6 +3625,10 @@ select.ie-in{width:auto}
     test: '<path d="M2 12h3l2-6 4 12 4-12 2 6h5"/>',
     sliders: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>'
   };
+  ICONS.bt = '<path d="m7 7 10 10-5 5V2l5 5L7 17"/>';
+  ICONS.speaker = '<rect x="4" y="2" width="16" height="20" rx="2"/><circle cx="12" cy="14" r="4"/><line x1="12" y1="6" x2="12.01" y2="6"/>';
+  ICONS.check = '<polyline points="20 6 9 17 4 12"/>';
+  ICONS.retry = '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>';
   function icon(name) {
     if (!ICONS[name]) return '';
     return '<svg class="as-ico" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + ICONS[name] + '</svg>';
@@ -3395,8 +3998,9 @@ select.ie-in{width:auto}
       tracks: st.tracks.map(function (t) { return cloneP(t); }),
       clips: st.clips.map(function (c) {
         return { id: c.id, trackId: c.trackId, name: c.name, buffer: c.buffer, start: c.start, offset: c.offset,
-          duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve };
-      })
+          duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null };
+      }),
+      takes: st.takes.map(function (k) { return Object.assign({}, k); })
     };
   }
   function serial(s) {
@@ -3406,7 +4010,8 @@ select.ie-in{width:auto}
     var selId = st.selClip && st.selClip.id;
     st.masterDb = s.masterDb;
     st.tracks = s.tracks.map(cloneP);
-    st.clips = s.clips.map(function (c) { return { id: c.id, trackId: c.trackId, name: c.name, buffer: c.buffer, start: c.start, offset: c.offset, duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve }; });
+    st.clips = s.clips.map(function (c) { return { id: c.id, trackId: c.trackId, name: c.name, buffer: c.buffer, start: c.start, offset: c.offset, duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null }; });
+    st.takes = (s.takes || []).map(function (k) { return Object.assign({}, k); });
     st.selClip = selId ? findClip(selId) : null;
     if (st.selTrack && !trackById(st.selTrack)) st.selTrack = null;
     if (st.armedId && !trackById(st.armedId)) st.armedId = null;
@@ -3417,6 +4022,7 @@ select.ie-in{width:auto}
     renderAll();
     reloadPlayback();
     updateHistBtns();
+    markDirty();
   }
   // Enregistre un état après une action (un seul état par geste : appelé au relâchement)
   function pushHistory(label) {
@@ -3428,6 +4034,7 @@ select.ie-in{width:auto}
     st.redo = [];
     st.last = cur; st.lastSer = ser;
     updateHistBtns();
+    markDirty();
   }
   // Pour les gestes continus (molette, recalage clavier) : un seul état après une courte pause
   function commitSoon(label) {
@@ -3503,6 +4110,7 @@ select.ie-in{width:auto}
   function startPlayback(fixedC0) {
     var c = getCtx();
     var P = st.playhead, L = loopRange(), rec = st.recording;
+    stopPreview(); kick();
     if (st.loop && !rec && (P < L.a || P >= L.b)) P = L.a;
     var C0 = fixedC0 != null ? fixedC0 : c.currentTime + 0.03;
     st.graph = buildGraph(c, c.destination, true);
@@ -3652,6 +4260,7 @@ select.ie-in{width:auto}
     return 'Micro indisponible : ' + ((err && err.message) || n || 'erreur inconnue') + '.';
   }
   function showMicError(err) {
+    st.booth.micErr = true;
     if (micUnavailable()) {
       var url = typeof window.SF_ONLINE_URL === 'string' && window.SF_ONLINE_URL ? window.SF_ONLINE_URL : null;
       showBanner('Le micro n’est pas disponible dans cette page. Ouvrez la version en ligne de Studio Fusion.', 'err', url);
@@ -3659,6 +4268,7 @@ select.ie-in{width:auto}
       showBanner(micErrorMsg(err), 'err', null);
     }
     setStatus('Micro indisponible (voir le message).', true);
+    renderBooth();
   }
   function micConstraints(simple) {
     if (simple) return { audio: true };
@@ -3679,6 +4289,7 @@ select.ie-in{width:auto}
   // IMPORTANT : getUserMedia est appelé de façon synchrone (même geste que ctx.resume(), exigence iOS)
   function openMic() {
     var key = micKey();
+    kick();
     if (rx.stream && rx.key === key) return Promise.resolve(rx.stream);
     closeMic();
     var md = navigator.mediaDevices;
@@ -3690,7 +4301,7 @@ select.ie-in{width:auto}
       });
     }).then(function (stream) {
       var c = getCtx();
-      rx.stream = stream; rx.key = key;
+      rx.stream = stream; rx.key = key; st.booth.micErr = false;
       rx.src = c.createMediaStreamSource(stream);
       rx.an = c.createAnalyser(); rx.an.fftSize = 2048; rx.buf = new Float32Array(2048);
       rx.zero = c.createGain(); rx.zero.gain.value = 0;
@@ -3700,6 +4311,7 @@ select.ie-in{width:auto}
       rx.zero.connect(c.destination);
       applyMicGains();
       refreshDevices();
+      renderBooth();
       return stream;
     });
   }
@@ -3780,6 +4392,8 @@ select.ie-in{width:auto}
   // Clic sur ● (ou R) : même geste -> ctx.resume() puis getUserMedia, puis capture et lecture au même instant
   function startRecording() {
     if (st.recording || st.recPending || rx.ending) return;
+    if (st.sess.pending) { setStatus('Choisis d’abord « Reprendre » ou « Nouvelle session » : sans cela, la prise ne serait pas sauvegardée.', true); return; }
+    kick();
     var c = getCtx();
     if (c.state !== 'running') c.resume().catch(noop);
     if (micUnavailable()) { showMicError(null); return; }
@@ -3817,7 +4431,7 @@ select.ie-in{width:auto}
     st.recording = true;
     st.recMute = t.id;
     st.playhead = P;
-    rx.take = { tid: t.id, pos: P, sr: c.sampleRate, lat: st.mic.latency, created: created, startAt: C0, srcs: 0, instru: false };
+    rx.take = { tid: t.id, pos: P, sr: c.sampleRate, lat: st.mic.latency, created: created, startAt: C0, cd: cd, srcs: 0, instru: false };
     rx.chunks = []; rx.nSamp = 0; rx.pk = []; rx.at = C0; rx.on = true; rx.hotUntil = 0;
     if (rx.node) rx.node.port.postMessage({ type: 'start', at: C0 });
     attachCapture(true);
@@ -3827,6 +4441,7 @@ select.ie-in{width:auto}
     for (var k = 0; k < cd; k++) scheduleClick(c, C0 - (cd - k) * b, k % 4 === 0);
     renderAll();
     setStatus(cd ? 'Décompte avant l’enregistrement…' : 'Enregistrement en cours…');
+    wakeOn();
   }
   // Repli MediaRecorder : dernier recours, synchronisation approximative
   function startMR() {
@@ -3858,6 +4473,7 @@ select.ie-in{width:auto}
     if (!st.recording) return;
     var pos = currentPos();
     st.recording = false; st.recMute = null; rx.on = false;
+    wakeOff();
     attachCapture(false);
     stopGraph(); st.playing = false; st.playhead = pos; stopTimerIfIdle();
     if (rx.nodeMode === 'mr') {
@@ -3896,14 +4512,21 @@ select.ie-in{width:auto}
     R.set(chans[chans.length > 1 ? 1 : 0].subarray(skip, skip + n));
     st.takeSeq += 1;
     var name = 'Prise ' + st.takeSeq;
-    var clip = addClip(t, buf, name, take.pos);
+    // Chaque prise est conservée ; sur la même zone, la précédente passe en réserve (non jouée)
+    var tk = { id: uid('k'), trackId: t.id, num: st.takeSeq, name: name, buffer: buf, at: Date.now(), lat: take.lat || 0,
+      base: take.pos, start: take.pos, offset: 0, duration: buf.duration, fadeIn: 0, fadeOut: 0, gainDb: 0, curve: st.curve, nudge: 0 };
+    st.takes.push(tk);
+    var clip = useTake(tk);
+    st.booth.lastId = tk.id;
     rx.lastTake = { clipId: clip.id, label: name, duration: clip.duration, instru: take.instru, srcs: take.srcs, lat: take.lat };
     renderAll();
     pushHistory(name);
+    saveNow();
     setStatus(name + ' ajoutée à « ' + t.name + ' » : ' + clip.duration.toFixed(3) + ' s, latence compensée de ' + take.lat + ' ms.');
   }
   function dropTrack(tid) {
     st.clips = st.clips.filter(function (c) { return c.trackId !== tid; });
+    st.takes = st.takes.filter(function (k) { return k.trackId !== tid; });
     st.tracks = st.tracks.filter(function (x) { return x.id !== tid; });
     if (st.armedId === tid) st.armedId = null;
     if (st.selTrack === tid) st.selTrack = null;
@@ -4051,6 +4674,7 @@ select.ie-in{width:auto}
     if (st.ui.sheetEl) st.ui.sheetEl.hidden = !st.sheet;
     if (st.ui.micBtn) st.ui.micBtn.classList.toggle('on', st.sheet);
     if (st.sheet) { refreshDevices(); updateSheet(); }
+    kick();
   }
   // Synchronise les contrôles du panneau avec l'état
   function updateSheet() {
@@ -4167,6 +4791,7 @@ select.ie-in{width:auto}
     var t = trackById(tid);
     if (!t) return;
     st.clips = st.clips.filter(function (c) { return c.trackId !== tid; });
+    st.takes = st.takes.filter(function (k) { return k.trackId !== tid; });
     st.tracks = st.tracks.filter(function (x) { return x !== t; });
     st.tracks.forEach(function (x) { (x.sends || []).forEach(function (s) { if (s.dest === tid) s.dest = null; }); });
     if (st.armedId === tid) st.armedId = null;
@@ -4279,7 +4904,7 @@ select.ie-in{width:auto}
     var right = {
       id: uid('c'), trackId: c.trackId, name: c.name + ' (2)', buffer: c.buffer,
       start: t, offset: c.offset + cut, duration: c.duration - cut,
-      fadeIn: 0, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve
+      fadeIn: 0, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null
     };
     c.duration = cut;
     c.fadeOut = 0;
@@ -4424,7 +5049,7 @@ select.ie-in{width:auto}
       return {
         id: uid('c'), trackId: c.trackId, name: c.name + ' (' + (k + 1) + ')', buffer: c.buffer,
         start: c.start + r[0], offset: c.offset + r[0], duration: r[1] - r[0],
-        fadeIn: 0, fadeOut: 0, gainDb: c.gainDb, curve: c.curve
+        fadeIn: 0, fadeOut: 0, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null
       };
     });
     var idx = st.clips.indexOf(c);
@@ -4735,7 +5360,7 @@ select.ie-in{width:auto}
   }
   function renderTools() {
     if (!st.root) return;
-    st.root.dataset.tool = st.tool;
+    if (st.ui.wrap) st.ui.wrap.dataset.tool = st.tool;
     (st.ui.toolBtns || []).forEach(function (b) { b.classList.toggle('on', b._tool === st.tool); });
     if (st.ui.modeSel) st.ui.modeSel.value = st.mode;
     if (st.ui.curveSel) st.ui.curveSel.value = st.selClip ? st.selClip.curve : st.curve;
@@ -5028,9 +5653,9 @@ select.ie-in{width:auto}
     }
     if (st.ui.playhead) st.ui.playhead.style.left = (hdrW() + pos * st.pxPerSec) + 'px';
   }
+  // Boucle d'image : active seulement pendant la lecture, l'enregistrement, le vumètre ou une animation
   function frame() {
-    requestAnimationFrame(frame);
-    if (!st.root) return;
+    if (!st.root) { st.frameOn = false; return; }
     if (st.redraw) {
       st.redraw = false;
       renderAll();
@@ -5043,10 +5668,19 @@ select.ie-in{width:auto}
     updateMeters();
     if (st.sheet) updateInputMeter();
     updateLive();
+    if (st.tab === 'booth') boothTick();
     if (st.playing && st.tab === 'edit' && st.ui.scroller) {
       var sc = st.ui.scroller, x = hdrW() + currentPos() * st.pxPerSec, vis = x - sc.scrollLeft;
       if (vis > sc.clientWidth - 60 || vis < hdrW() + 20) sc.scrollLeft = Math.max(0, x - hdrW() - 40);
     }
+    if (needsFrame()) requestAnimationFrame(frame); else st.frameOn = false;
+  }
+  function needsFrame() {
+    return st.playing || st.recording || st.recPending || rx.testing || st.sheet || st.redraw || !!st.anchor ||
+      !!rx.cal || (st.tab === 'booth' && !!rx.stream);
+  }
+  function kick() {
+    if (!st.frameOn && st.root) { st.frameOn = true; requestAnimationFrame(frame); }
   }
 
   // ---------- Rendu global ----------
@@ -5065,6 +5699,7 @@ select.ie-in{width:auto}
     u.timeMode.querySelector('.as-bl').textContent = st.timeMode === 'bars' ? 'Mesures' : 'Temps';
     if (document.activeElement !== u.bpm) u.bpm.value = st.bpm;
     if (u.pill) u.pill.hidden = !!(st.ctx && st.ctx.state === 'running');
+    if (u.boothWin) renderBooth();
   }
   function renderAll() {
     if (!st.root) return;
@@ -5077,12 +5712,18 @@ select.ie-in{width:auto}
     updateSheet();
   }
   function showTab(name) {
+    if (name !== 'booth' && name !== 'edit' && name !== 'mix') name = 'edit';
+    if (name === 'booth') st.ui.miniFor = null; // la forme d'onde de l'instru se redessine à l'affichage
     st.tab = name;
+    if (st.ui.wrap) st.ui.wrap.dataset.view = name;
+    st.ui.boothWin.hidden = name !== 'booth';
     st.ui.editWin.hidden = name !== 'edit';
     st.ui.mixWin.hidden = name !== 'mix';
+    st.ui.tabBooth.classList.toggle('on', name === 'booth');
     st.ui.tabEdit.classList.toggle('on', name === 'edit');
     st.ui.tabMix.classList.toggle('on', name === 'mix');
     renderAll();
+    kick();
   }
 
   // ---------- Feuille de style (jetons de DESIGN.md, sans apostrophe dans les chaînes) ----------
@@ -5304,7 +5945,108 @@ select.ie-in{width:auto}
     '.as-banner{margin:6px 8px 0;}',
     '.as-mon-g,.as-instru,.as-lat{height:24px;}',
     '}',
-    '@media (pointer:coarse){.as-btn{height:42px;}}'
+    '@media (pointer:coarse){.as-btn{height:44px;}.as-chip{width:44px;height:44px;}.as-chip.as-pp{width:auto;}.as-x,.as-ins-btn{width:44px;min-width:44px;height:44px;}.as-tcolor{width:44px;height:44px;}.as-sel,.as-num,.as-tname,.as-ins-sel,.as-send-sel{min-height:44px;}.as-srange,.as-send-r,.as-prange,.as-lat,.as-mon-g,.as-instru{height:32px;}.as-tab{height:44px;}.as-tab{min-height:44px;}}',
+    // Cabine : vue verticale, cartes en verre dépoli, grosses cibles tactiles
+    '.as-tab::before{display:none;}',
+    '.as-tab .as-ico{width:17px;height:17px;flex:none;}',
+    '.as-saved{margin-left:auto;font-size:11.5px;color:var(--muted,#9d95b8);white-space:nowrap;}',
+    '.as-root[data-view=booth] .as-top,.as-root[data-view=booth] .as-filebar,.as-root[data-view=booth] .as-gen{display:none !important;}',
+    '.as-booth-win{overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch;}',
+    '.as-booth{max-width:560px;width:100%;margin:0 auto;padding:10px 12px 28px;display:flex;flex-direction:column;gap:12px;box-sizing:border-box;}',
+    '.as-bstat{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;background:var(--panel,rgba(28,24,44,.86));backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid var(--border,rgba(255,255,255,.08));border-radius:var(--radius,12px);}',
+    '.as-pill{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:999px;background:var(--panel2,#241e38);border:1px solid var(--border,rgba(255,255,255,.08));color:var(--muted,#9d95b8);font-size:12px;max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}',
+    '.as-pill::before{content:"";width:7px;height:7px;flex:none;border-radius:50%;background:var(--muted,#9d95b8);}',
+    '.as-pill.ok{color:var(--text,#efecf8);}',
+    '.as-pill.ok::before{background:var(--ok,#34d399);box-shadow:0 0 8px var(--ok,#34d399);}',
+    '.as-pill.err{color:#fecdd3;}',
+    '.as-pill.err::before{background:var(--hot,#f43f5e);}',
+    '.as-bstat-t{margin-left:auto;font:600 13px/1 var(--mono,ui-monospace,monospace);font-variant-numeric:tabular-nums;color:#fff;}',
+    '.as-bstat-s{font-size:11.5px;color:var(--muted,#9d95b8);white-space:nowrap;}',
+    '.as-bmsg{min-height:18px;font-size:12.5px;line-height:1.4;color:var(--muted,#9d95b8);padding:0 4px;}',
+    '.as-bmsg.as-err{color:#fda4af;}',
+    '.as-card{position:relative;padding:14px;background:linear-gradient(180deg,rgba(46,39,71,.82),rgba(28,24,44,.9));backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid var(--border,rgba(255,255,255,.08));border-radius:var(--radius,12px);box-shadow:var(--shadow,0 8px 30px rgba(0,0,0,.45));transition:border-color .18s,box-shadow .18s;}',
+    '.as-card.as-onair{border-color:var(--hot,#f43f5e);box-shadow:0 0 0 1px var(--hot,#f43f5e),0 0 26px rgba(244,63,94,.35);}',
+    '.as-card-h{display:flex;align-items:center;gap:10px;margin-bottom:12px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted,#9d95b8);font-weight:600;}',
+    '.as-step-n{width:26px;height:26px;border-radius:50%;background:var(--grad,linear-gradient(135deg,#22d3ee,#a855f7,#f43f5e));color:#0c0a14;display:inline-flex;align-items:center;justify-content:center;font:800 13px/1 var(--font,system-ui,sans-serif);letter-spacing:0;flex:none;}',
+    '.as-stack{display:flex;flex-direction:column;gap:10px;}',
+    '.as-sub{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted,#9d95b8);margin:16px 0 8px;font-weight:600;}',
+    '.as-cbtn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:48px;padding:0 14px;border-radius:12px;background:var(--panel2,#241e38);border:1px solid var(--border,rgba(255,255,255,.08));color:var(--text,#efecf8);font:600 14px/1.2 var(--font,system-ui,sans-serif);cursor:pointer;user-select:none;-webkit-user-select:none;transition:background .15s,border-color .15s,transform .12s;}',
+    '.as-cbtn:hover{background:var(--panel3,#2e2747);border-color:var(--border2,rgba(255,255,255,.16));}',
+    '.as-cbtn:active{transform:scale(.97);}',
+    '.as-cbtn:disabled{opacity:.4;cursor:default;transform:none;}',
+    '.as-cbtn .as-ico{width:20px;height:20px;}',
+    '.as-cbtn.xl{width:100%;min-height:58px;font-size:17px;border-style:dashed;border-color:rgba(168,85,247,.6);background:linear-gradient(135deg,rgba(34,211,238,.12),rgba(168,85,247,.22));}',
+    '.as-cbtn.xl .as-ico{width:22px;height:22px;}',
+    '.as-cbtn.sm{min-height:40px;padding:0 10px;font-size:13px;}',
+    '.as-cbtn.lg{min-height:52px;padding:0 18px;font-size:15px;}',
+    '.as-cbtn.keep{background:linear-gradient(135deg,rgba(52,211,153,.3),rgba(52,211,153,.12));border-color:var(--ok,#34d399);}',
+    '.as-cbtn.danger{color:#fecdd3;}',
+    '.as-cbtn.on{background:linear-gradient(135deg,rgba(168,85,247,.35),rgba(168,85,247,.15));border-color:var(--accent2,#a855f7);}',
+    '.as-link{align-self:center;background:none;border:none;color:var(--muted,#9d95b8);text-decoration:underline;min-height:48px;padding:0 8px;cursor:pointer;font:13px var(--font,system-ui,sans-serif);}',
+    '.as-link:hover{color:var(--text,#efecf8);}',
+    '.as-note-b{font-size:12.5px;line-height:1.4;color:#fde68a;background:rgba(251,191,36,.10);border:1px solid rgba(251,191,36,.4);border-radius:10px;padding:8px 10px;}',
+    '.as-iname{font-weight:700;font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.as-imeta{font:12px var(--mono,ui-monospace,monospace);color:var(--muted,#9d95b8);}',
+    '.as-mini{display:block;width:100%;height:56px;border-radius:10px;background:var(--bg2,#151223);}',
+    '.as-row2{display:flex;gap:8px;flex-wrap:wrap;}',
+    '.as-row2 .as-cbtn{flex:1 1 140px;}',
+    '.as-mrow{display:flex;align-items:center;gap:12px;min-height:44px;}',
+    '.as-mlbl{min-width:96px;white-space:nowrap;flex:none;font-size:14px;color:var(--text,#efecf8);}',
+    '.as-mval{width:64px;flex:none;text-align:right;font:13px var(--mono,ui-monospace,monospace);color:var(--muted,#9d95b8);}',
+    '.as-br{-webkit-appearance:none;appearance:none;flex:1;min-width:0;width:100%;height:28px;background:transparent;accent-color:var(--accent2,#a855f7);margin:0;}',
+    '.as-br::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:linear-gradient(90deg,#5b4f8f,#2e2750);}',
+    '.as-br::-webkit-slider-thumb{-webkit-appearance:none;width:24px;height:24px;margin-top:-10px;border-radius:50%;background:#fff;box-shadow:0 0 0 3px var(--accent2,#a855f7),0 0 12px rgba(168,85,247,.6);}',
+    '.as-br::-moz-range-track{height:4px;border-radius:2px;background:#2a2442;}',
+    '.as-br::-moz-range-thumb{width:22px;height:22px;border:none;border-radius:50%;background:#fff;box-shadow:0 0 0 3px var(--accent2,#a855f7);}',
+    '.as-hps{display:flex;flex-direction:column;gap:8px;}',
+    '.as-hp{display:flex;align-items:center;gap:12px;width:100%;min-height:64px;padding:10px 14px;border-radius:14px;background:var(--panel2,#241e38);border:1px solid var(--border,rgba(255,255,255,.08));color:var(--text,#efecf8);text-align:left;cursor:pointer;font:inherit;transition:background .15s,border-color .15s,box-shadow .15s;}',
+    '.as-hp:hover{border-color:var(--border2,rgba(255,255,255,.16));}',
+    '.as-hp .as-ico{width:26px;height:26px;flex:none;color:var(--accent,#22d3ee);}',
+    '.as-hp-tx{display:flex;flex-direction:column;gap:2px;min-width:0;}',
+    '.as-hp-t{font-weight:700;font-size:15px;}',
+    '.as-hp-s{font-size:12px;color:var(--muted,#9d95b8);}',
+    '.as-hp.on{background:linear-gradient(135deg,rgba(168,85,247,.35),rgba(168,85,247,.15));border-color:var(--accent2,#a855f7);box-shadow:0 0 0 1px var(--accent2,#a855f7),0 0 18px rgba(168,85,247,.35);}',
+    '.as-opts{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}',
+    '.as-pchip{min-height:48px;padding:0 14px;border-radius:999px;background:var(--panel2,#241e38);border:1px solid var(--border,rgba(255,255,255,.08));color:var(--muted,#9d95b8);font:600 13px var(--font,system-ui,sans-serif);cursor:pointer;}',
+    '.as-pchip.on{color:#fff;background:linear-gradient(135deg,rgba(168,85,247,.35),rgba(168,85,247,.15));border-color:var(--accent2,#a855f7);}',
+    '.as-sw{display:inline-flex;align-items:center;gap:10px;min-height:48px;padding:0 14px;border-radius:999px;background:var(--panel2,#241e38);border:1px solid var(--border,rgba(255,255,255,.08));color:var(--muted,#9d95b8);font:600 13px var(--font,system-ui,sans-serif);cursor:pointer;}',
+    '.as-sw.on{color:#fff;border-color:var(--accent2,#a855f7);}',
+    '.as-swk{position:relative;width:36px;height:20px;border-radius:999px;background:#2a2442;flex:none;transition:background .15s;}',
+    '.as-swk::after{content:"";position:absolute;left:3px;top:3px;width:14px;height:14px;border-radius:50%;background:#fff;transition:transform .15s;}',
+    '.as-sw.on .as-swk{background:var(--accent2,#a855f7);}',
+    '.as-sw.on .as-swk::after{transform:translateX(16px);}',
+    '.as-recwrap{position:relative;width:160px;height:160px;margin:14px auto 4px;display:flex;align-items:center;justify-content:center;}',
+    '.as-ring{position:absolute;left:20px;top:20px;width:120px;height:120px;border-radius:50%;border:3px solid rgba(244,63,94,.6);transform:scale(calc(1 + var(--lvl,0) * .45));opacity:calc(.25 + var(--lvl,0) * .75);transition:transform 80ms linear,opacity 80ms linear;pointer-events:none;}',
+    '.as-recbig{position:relative;width:120px;height:120px;border-radius:50%;border:none;background:radial-gradient(circle at 35% 30%,#fb7185,#f43f5e 55%,#be123c);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 10px 30px rgba(244,63,94,.45);transition:transform .12s;}',
+    '.as-recbig:active{transform:scale(.96);}',
+    '.as-recbig .as-ico{width:44px;height:44px;}',
+    '.as-recbig:disabled{opacity:.45;cursor:default;}',
+    '.as-recl{text-align:center;font-weight:700;font-size:16px;margin-bottom:4px;}',
+    '.as-cd{font:800 96px/1 var(--mono,ui-monospace,monospace);text-align:center;color:#fff;text-shadow:0 0 30px rgba(244,63,94,.8);font-variant-numeric:tabular-nums;min-height:96px;}',
+    '.as-chrono{font:700 56px/1 var(--mono,ui-monospace,monospace);text-align:center;color:#fff;font-variant-numeric:tabular-nums;}',
+    '.as-lw{display:block;width:100%;height:72px;border-radius:10px;background:var(--bg2,#151223);}',
+    '.as-prog{height:6px;border-radius:3px;background:#2a2442;overflow:hidden;}',
+    '.as-prog-f{height:100%;width:0;background:var(--grad,linear-gradient(135deg,#22d3ee,#a855f7,#f43f5e));}',
+    '.as-stopbig{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;width:96px;height:96px;margin:14px auto 0;border-radius:20px;border:none;background:var(--hot,#f43f5e);color:#fff;font:700 13px var(--font,system-ui,sans-serif);cursor:pointer;box-shadow:0 8px 24px rgba(244,63,94,.45);}',
+    '.as-stopbig .as-ico{width:30px;height:30px;}',
+    '.as-takec{margin-top:16px;padding:12px;border-radius:12px;background:var(--panel2,#241e38);border:1px solid var(--border2,rgba(255,255,255,.16));}',
+    '.as-takec-h{font-weight:700;font-size:16px;margin-bottom:10px;}',
+    '.as-tgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}',
+    '.as-tgrid .as-cbtn{min-height:52px;}',
+    '.as-cal{display:flex;align-items:center;gap:10px;margin-top:12px;}',
+    '.as-tl{display:flex;flex-direction:column;gap:6px;}',
+    '.as-tlrow{display:flex;align-items:center;gap:8px;min-height:56px;padding:6px 8px 6px 12px;border-radius:12px;background:var(--panel2,#241e38);border:1px solid var(--border,rgba(255,255,255,.08));}',
+    '.as-tlrow.on{border-color:var(--ok,#34d399);box-shadow:inset 0 0 0 1px rgba(52,211,153,.35);}',
+    '.as-tlinfo{flex:1;min-width:0;}',
+    '.as-tln{font-weight:700;font-size:14px;}',
+    '.as-tlm{font:12px var(--mono,ui-monospace,monospace);color:var(--muted,#9d95b8);}',
+    '.as-tlrow .as-pill{height:26px;}',
+    '.as-acts{display:flex;flex-direction:column;gap:8px;margin-top:14px;}',
+    '.as-booth .as-note{margin-top:0;}',
+    '.as-banner-acts{display:flex;gap:6px;flex-wrap:wrap;width:100%;}',
+    '.as-banner .as-btn{height:36px;}',
+    '.as-btn.as-danger{color:#fecdd3;border-color:rgba(244,63,94,.6);}',
+    '@media (max-width:820px){.as-booth{padding:8px 8px 26px;}.as-card{padding:12px;}.as-cd{font-size:84px;}.as-chrono{font-size:48px;}.as-tlrow{padding-left:10px;}}'
   ].join('\n');
 
   // ---------- Construction du DOM ----------
@@ -5357,7 +6099,11 @@ select.ie-in{width:auto}
     ui.pill = ibtn(srow, 'play', 'Activer le son', 'Le son du navigateur est suspendu. Touchez pour l’activer. Sur iPhone, le mode silencieux coupe aussi le son Web Audio.', unlockAudio, 'as-pill-btn');
     ui.pill.hidden = true;
     ui.status = el('span', 'as-status');
+    ui.status.setAttribute('role', 'status');
+    ui.status.setAttribute('aria-live', 'polite');
     srow.appendChild(ui.status);
+    ui.saved = el('span', 'as-saved', '');
+    srow.appendChild(ui.saved);
     top.appendChild(srow);
     p.appendChild(top);
   }
@@ -5407,13 +6153,18 @@ select.ie-in{width:auto}
   }
   function buildTabs(p) {
     var t = el('div', 'as-tabs');
-    st.ui.tabEdit = el('button', 'as-tab', 'Édition');
-    st.ui.tabEdit.type = 'button';
-    st.ui.tabEdit.addEventListener('click', function () { showTab('edit'); });
-    st.ui.tabMix = el('button', 'as-tab', 'Mixage');
-    st.ui.tabMix.type = 'button';
-    st.ui.tabMix.addEventListener('click', function () { showTab('mix'); });
-    t.appendChild(st.ui.tabEdit); t.appendChild(st.ui.tabMix);
+    // Ordre : Cabine (première), Édition, Mixage
+    [['booth', 'Cabine', 'mic'], ['edit', 'Édition', 'scissors'], ['mix', 'Mixage', 'sliders']].forEach(function (d) {
+      var b = el('button', 'as-tab');
+      b.type = 'button';
+      b.innerHTML = icon(d[2]);
+      b._ic = d[2];
+      b.appendChild(el('span', null, d[1]));
+      b.setAttribute('aria-label', d[1]);
+      b.addEventListener('click', function () { showTab(d[0]); });
+      st.ui['tab' + d[0].charAt(0).toUpperCase() + d[0].slice(1)] = b;
+      t.appendChild(b);
+    });
     p.appendChild(t);
   }
   // Panneau Strip Silence : seuil, durée minimale du silence, pads début / fin, aperçu en direct
@@ -5641,6 +6392,817 @@ select.ie-in{width:auto}
     p.appendChild(sh);
   }
 
+  // ---------- Prises : une prise = un buffer enregistré ; une seule prise active par zone ----------
+  function takeById(id) { for (var i = 0; i < st.takes.length; i++) if (st.takes[i].id === id) return st.takes[i]; return null; }
+  function takesOf(tid) { return st.takes.filter(function (k) { return k.trackId === tid; }).sort(function (a, b) { return a.num - b.num; }); }
+  function clipOfTake(tk) { for (var i = 0; i < st.clips.length; i++) if (st.clips[i].takeId === tk.id) return st.clips[i]; return null; }
+  function isActive(tk) { return !!clipOfTake(tk); }
+  function firstClipOf(t) { var l = clipsOf(t.id).sort(function (a, b) { return a.start - b.start; }); return l.length ? l[0] : null; }
+  // Retire la prise de la timeline : ses paramètres sont gardés dans la prise (réserve)
+  function parkTake(tid) {
+    var tk = takeById(tid), list = st.clips.filter(function (c) { return c.takeId === tid; });
+    if (!tk || !list.length) return;
+    list.sort(function (a, b) { return a.start - b.start; });
+    var c0 = list[0];
+    tk.start = c0.start; tk.offset = c0.offset; tk.duration = c0.duration;
+    tk.fadeIn = c0.fadeIn; tk.fadeOut = c0.fadeOut; tk.gainDb = c0.gainDb; tk.curve = c0.curve;
+    st.clips = st.clips.filter(function (c) { return c.takeId !== tid; });
+    if (st.selClip && st.selClip.takeId === tid) st.selClip = null;
+  }
+  // Rend la prise active : les prises qui se recouvrent sur la même piste passent en réserve
+  function useTake(tk) {
+    var t = trackById(tk.trackId);
+    if (!t) return null;
+    var a0 = tk.start, a1 = tk.start + tk.duration;
+    st.clips.slice().forEach(function (c) {
+      if (c.trackId === t.id && c.takeId && c.takeId !== tk.id && c.start < a1 - 1e-6 && a0 < c.start + c.duration - 1e-6) parkTake(c.takeId);
+    });
+    parkTake(tk.id);
+    var clip = { id: uid('c'), trackId: t.id, name: tk.name, buffer: tk.buffer, start: tk.start, offset: tk.offset, duration: tk.duration,
+      fadeIn: tk.fadeIn, fadeOut: tk.fadeOut, gainDb: tk.gainDb, curve: tk.curve, takeId: tk.id };
+    st.clips.push(clip);
+    st.selClip = clip; st.selTrack = t.id;
+    if (st.mode === 'shuffle') resolveShuffle(t.id);
+    return clip;
+  }
+  function removeTake(tid) {
+    parkTake(tid);
+    st.takes = st.takes.filter(function (k) { return k.id !== tid; });
+    if (st.booth.lastId === tid) st.booth.lastId = null;
+  }
+  // Calage : décale la prise par rapport à son point de départ (± 200 ms)
+  function nudgeTake(tk, ms) {
+    tk.nudge = ms;
+    var c = clipOfTake(tk);
+    if (c) c.start = Math.max(0, Math.round((tk.base + ms / 1000) * 1000) / 1000);
+  }
+  function useTakeUI(tk) {
+    if (st.recording || isActive(tk)) return;
+    useTake(tk);
+    st.booth.lastId = tk.id;
+    edited('Utiliser la prise ' + tk.num);
+  }
+  function boothRedo(tk) {
+    if (st.recording || st.recPending) return;
+    var base = tk.base, num = tk.num;
+    removeTake(tk.id);
+    edited('Refaire la prise ' + num);
+    boothRec(base);
+  }
+  function boothDelete(tk) {
+    if (st.recording) return;
+    var num = tk.num;
+    removeTake(tk.id);
+    edited('Supprimer la prise ' + num);
+    setStatus('Prise ' + num + ' supprimée (Ctrl+Z pour annuler).');
+  }
+  function boothKeep(tk) {
+    st.booth.lastId = null;
+    markDirty();
+    setStatus('Prise ' + tk.num + ' gardée.');
+    renderBooth();
+  }
+  function boothListen(tk) {
+    if (st.recording || st.recPending || !isActive(tk)) return;
+    stopPreview();
+    seek(tk.start);
+    play();
+  }
+  // Écoute d'une prise seule (la liste « Mes prises »)
+  function stopPreview() {
+    var s = st.booth.prev;
+    st.booth.prev = null; st.booth.prevId = null;
+    if (s) { s.onended = null; try { s.stop(); } catch (e) { /* déjà arrêté */ } }
+  }
+  function previewTake(tk) {
+    if (st.recording || st.recPending) return;
+    if (st.booth.prevId === tk.id) { stopPreview(); renderBooth(); return; }
+    stopPreview();
+    if (st.playing) pause();
+    var c = getCtx();
+    if (c.state !== 'running') c.resume().catch(noop);
+    var s = c.createBufferSource();
+    s.buffer = tk.buffer;
+    s.connect(c.destination);
+    s.onended = function () {
+      if (st.booth.prev === s) { st.booth.prev = null; st.booth.prevId = null; renderBooth(); }
+    };
+    s.start();
+    st.booth.prev = s; st.booth.prevId = tk.id;
+    setStatus('Écoute de la prise ' + tk.num + ' seule.');
+    renderBooth();
+  }
+  function wakeOn() {
+    try {
+      if (navigator.wakeLock && navigator.wakeLock.request) {
+        navigator.wakeLock.request('screen').then(function (s) { wake = s; }, noop);
+      }
+    } catch (e) { /* verrou d'écran indisponible */ }
+  }
+  function wakeOff() {
+    try { if (wake && wake.release) wake.release().catch(noop); } catch (e) { /* ignore */ }
+    wake = null;
+  }
+
+  // ---------- Cabine : instru, casque, enregistrement, prises, mixage ----------
+  var HEADSETS = {
+    wired: { t: 'Filaire / EarPods', s: 'Latence ≈ 40 ms', lat: 40, ic: 'headphones' },
+    bt: { t: 'Bluetooth (JBL, AirPods…)', s: 'Latence ≈ 250 ms', lat: 250, ic: 'bt' },
+    none: { t: 'Sans casque', s: 'Anti-écho activé, retour micro coupé', lat: 40, ic: 'speaker' }
+  };
+  var HP_KEY = 'sf_booth_headset';
+  var PRESETS = {
+    studio: [{ type: 'eq', params: { low: -2, mid: 0, high: 3 } }, { type: 'comp', params: { threshold: -18, ratio: 3, attack: 0.003, release: 0.25 } }],
+    radio: [{ type: 'eq', params: { low: -12, mid: 6, high: -6 } }, { type: 'dist', params: { amount: 15 } }],
+    echo: [{ type: 'reverb', params: { duration: 2, mix: 0.25 } }, { type: 'delay', params: { time: 0.3, feedback: 0.3, mix: 0.25 } }]
+  };
+  var PRESET_LABEL = { none: 'Aucun', studio: 'Studio', radio: 'Radio', echo: 'Écho' };
+
+  function voiceTrack() {
+    for (var i = 0; i < st.tracks.length; i++) { var t = st.tracks[i]; if (t.type !== 'aux' && t.name === 'Voix') return t; }
+    return null;
+  }
+  // L'instru : première piste non « Voix » qui contient des clips
+  function instruTrack() {
+    var v = voiceTrack();
+    for (var i = 0; i < st.tracks.length; i++) {
+      var t = st.tracks[i];
+      if (t.type !== 'aux' && t !== v && t.name !== 'Voix' && clipsOf(t.id).length) return t;
+    }
+    return null;
+  }
+  // Volume en pourcentage (0-100 %, 100 % = 0 dB), affiché simplement
+  function pctOf(t) { return !t || t.db <= -60 ? 0 : Math.round(Math.pow(10, t.db / 20) * 100); }
+  function setPct(t, p) { t.db = p <= 0 ? -60 : clamp(20 * Math.log10(p / 100), -60, 0); applyMixLive(); }
+  function presetOf(t) {
+    if (!t) return 'none';
+    var ty = t.inserts.filter(Boolean).map(function (i) { return i.type; });
+    if (!ty.length) return 'none';
+    if (ty.indexOf('reverb') >= 0) return 'echo';
+    if (ty.indexOf('dist') >= 0) return 'radio';
+    if (ty.indexOf('eq') >= 0) return 'studio';
+    return '';
+  }
+  function applyPreset(name) {
+    var v = voiceTrack() || addTrack('Voix');
+    var list = PRESETS[name] || [];
+    v.inserts = [0, 1, 2, 3].map(function (i) { var p = list[i]; return p ? { type: p.type, params: cloneP(p.params) } : null; });
+    st.insSel = null;
+    edited('Effet voix : ' + PRESET_LABEL[name]);
+  }
+  function importInstru(file) {
+    var c = getCtx();
+    setStatus('Chargement de l’instru…');
+    file.arrayBuffer().then(function (ab) { return c.decodeAudioData(ab); }).then(function (buf) {
+      var t = instruTrack(), name = baseName(file.name);
+      if (t) st.clips = st.clips.filter(function (x) { return x.trackId !== t.id; });
+      else t = addTrack('Instru');
+      st.booth.acap = false;
+      addClip(t, buf, name, 0);
+      edited('Importer l’instru');
+      setStatus('Instru chargée : ' + name + ' (' + fmtDur(buf.duration) + ').');
+    }).catch(function (err) {
+      setStatus('Import impossible : ' + file.name + ' (' + ((err && err.message) || err) + ')', true);
+    });
+  }
+  function loadHP() { try { var v = window.localStorage.getItem(HP_KEY); return HEADSETS[v] ? v : null; } catch (e) { return null; } }
+  function saveHP(v) { try { window.localStorage.setItem(HP_KEY, v); } catch (e) { /* stockage indisponible */ } }
+  function boothSetHeadset(k) {
+    var h = HEADSETS[k];
+    st.booth.hp = k; saveHP(k);
+    st.mic.latency = h.lat; saveLatency();
+    st.mic.voice = k === 'none';
+    if (k === 'none' && st.mic.monitor) setMonitor(false);
+    micSettingsChanged();
+    setStatus(k === 'none' ? 'Sans casque : l’instru sera captée par le micro (anti-écho activé).' : 'Casque : ' + h.t + ' (latence ' + h.lat + ' ms).');
+    markDirty();
+    renderBooth();
+  }
+  // Enregistrement depuis la Cabine : piste « Voix » (créée si absente), décompte selon le réglage
+  function boothRec(pos) {
+    if (st.recording) { stopRecording(); return; }
+    if (st.recPending) return;
+    var b = st.booth;
+    st.mic.countIn = b.count ? 4 : 0;
+    if (st.playing) pause();
+    if (pos != null) st.playhead = pos;
+    else if (b.start === 'zero') st.playhead = 0;
+    var v = voiceTrack() || addTrack('Voix');
+    st.armedId = v.id;
+    startRecording();
+    renderBooth();
+    kick();
+  }
+  function micPill() {
+    if (st.booth.micErr) return ['err', 'Micro : refusé'];
+    if (rx.stream) return ['ok', 'Micro : prêt'];
+    return ['', 'Micro : pas encore ouvert'];
+  }
+  function setPill(node, cls, text) { node.className = 'as-pill' + (cls ? ' ' + cls : ''); node.textContent = text; }
+  function fmtDur(t) { var s = Math.round(Math.max(0, t)); return Math.floor(s / 60) + ':' + pad(s % 60, 2); }
+  function clockOf(ms) { var d = new Date(ms); return pad(d.getHours(), 2) + ':' + pad(d.getMinutes(), 2); }
+  function fmtDate(ms) { var d = new Date(ms); return pad(d.getDate(), 2) + '/' + pad(d.getMonth() + 1, 2) + '/' + d.getFullYear() + ' à ' + pad(d.getHours(), 2) + 'h' + pad(d.getMinutes(), 2); }
+  function msText(n) { return (n > 0 ? '+' : '') + n + ' ms'; }
+  function cbtn(parent, ic, label, cls, fn) {
+    var b = el('button', 'as-cbtn' + (cls ? ' ' + cls : ''));
+    b.type = 'button';
+    b.innerHTML = icon(ic);
+    b._ic = ic;
+    var sp = el('span', null, label || '');
+    b._lbl = sp;
+    b.appendChild(sp);
+    b.setAttribute('aria-label', label || ic);
+    b.addEventListener('click', function (e) { e.stopPropagation(); fn(); });
+    if (parent) parent.appendChild(b);
+    return b;
+  }
+  function pchip(parent, label, fn) {
+    var b = el('button', 'as-pchip', label);
+    b.type = 'button';
+    b.addEventListener('click', function (e) { e.stopPropagation(); fn(); });
+    parent.appendChild(b);
+    return b;
+  }
+  function card(parent, n, title) {
+    var c = el('section', 'as-card');
+    var h = el('div', 'as-card-h');
+    h.appendChild(el('span', 'as-step-n', String(n)));
+    h.appendChild(el('span', null, title));
+    c.appendChild(h);
+    parent.appendChild(c);
+    return c;
+  }
+  function vrow(parent, label, min, max, step) {
+    var row = el('div', 'as-mrow');
+    row.appendChild(el('span', 'as-mlbl', label));
+    var r = inp('range', 'as-br');
+    r.min = min; r.max = max; r.step = step;
+    r.setAttribute('aria-label', label);
+    var v = el('span', 'as-mval', '');
+    row.appendChild(r); row.appendChild(v);
+    parent.appendChild(row);
+    return { row: row, r: r, v: v };
+  }
+  function syncVol(row, t) {
+    row.r.disabled = !t;
+    if (document.activeElement !== row.r) row.r.value = pctOf(t);
+    row.v.textContent = pctOf(t) + ' %';
+  }
+
+  function buildBooth(p) {
+    var u = st.ui, win = el('div', 'as-win as-booth-win'), box = el('div', 'as-booth');
+    win.hidden = true; win.appendChild(box);
+    u.boothWin = win; u.hp = {}; u.presets = {};
+    // Barre d'état : micro, casque, temps, sauvegarde
+    var bar = el('div', 'as-bstat');
+    u.bMic = el('span', 'as-pill', ''); u.bHp = el('span', 'as-pill', '');
+    u.bTime = el('span', 'as-bstat-t', '00:00');
+    u.bSaved = el('span', 'as-bstat-s', '');
+    bar.appendChild(u.bMic); bar.appendChild(u.bHp); bar.appendChild(u.bTime); bar.appendChild(u.bSaved);
+    box.appendChild(bar);
+    u.bStatus = el('div', 'as-bmsg', '');
+    u.bStatus.setAttribute('role', 'status'); u.bStatus.setAttribute('aria-live', 'polite');
+    box.appendChild(u.bStatus);
+    u.bFile = inp('file', null); u.bFile.accept = 'audio/*'; u.bFile.hidden = true;
+    u.bFile.addEventListener('change', function () {
+      if (u.bFile.files && u.bFile.files[0]) importInstru(u.bFile.files[0]);
+      u.bFile.value = '';
+    });
+    box.appendChild(u.bFile);
+
+    // 1. Ton instru
+    var c1 = card(box, 1, 'Ton instru');
+    u.iEmpty = el('div', 'as-stack');
+    cbtn(u.iEmpty, 'import', 'Importer l’instru', 'xl', function () { u.bFile.click(); });
+    u.acapNote = el('div', 'as-note-b', 'Mode a cappella : tu enregistres sans instrumentale.');
+    u.acapNote.hidden = true;
+    u.iEmpty.appendChild(u.acapNote);
+    var acap = el('button', 'as-link', 'Pas d’instru (a cappella)');
+    acap.type = 'button';
+    acap.addEventListener('click', function () {
+      st.booth.acap = true; markDirty();
+      setStatus('Mode a cappella : tu enregistres sans instrumentale.');
+      renderBooth();
+    });
+    u.iEmpty.appendChild(acap);
+    c1.appendChild(u.iEmpty);
+    u.iFull = el('div', 'as-stack'); u.iFull.hidden = true;
+    u.iName = el('div', 'as-iname', ''); u.iMeta = el('div', 'as-imeta', '');
+    u.mini = el('canvas', 'as-mini');
+    u.iFull.appendChild(u.iName); u.iFull.appendChild(u.iMeta); u.iFull.appendChild(u.mini);
+    var r1 = el('div', 'as-row2');
+    u.iPlay = cbtn(r1, 'play', 'Écouter', 'lg', function () { if (st.recording) return; stopPreview(); togglePlay(); });
+    cbtn(r1, 'import', 'Changer', 'lg', function () { u.bFile.click(); });
+    u.iFull.appendChild(r1);
+    u.iVol = vrow(u.iFull, 'Volume instru', 0, 100, 1);
+    c1.appendChild(u.iFull);
+    u.iVol.r.addEventListener('input', function () {
+      var t = instruTrack(); if (!t) return;
+      setPct(t, +u.iVol.r.value); u.iVol.v.textContent = pctOf(t) + ' %';
+    });
+    u.iVol.r.addEventListener('change', function () { pushHistory('Volume instru'); });
+
+    // 2. Ton casque
+    var c2 = card(box, 2, 'Ton casque');
+    var hps = el('div', 'as-hps');
+    ['wired', 'bt', 'none'].forEach(function (k) {
+      var h = HEADSETS[k], b = el('button', 'as-hp');
+      b.type = 'button';
+      b.innerHTML = icon(h.ic);
+      var tx = el('span', 'as-hp-tx');
+      tx.appendChild(el('span', 'as-hp-t', h.t));
+      tx.appendChild(el('span', 'as-hp-s', h.s));
+      b.appendChild(tx);
+      b.setAttribute('aria-pressed', 'false');
+      b.addEventListener('click', function () { boothSetHeadset(k); });
+      u.hp[k] = b; hps.appendChild(b);
+    });
+    c2.appendChild(hps);
+    u.btNote = el('div', 'as-note-b', 'Le micro du casque Bluetooth enregistre en qualité réduite ; si possible, chante dans le micro de l’iPhone.');
+    u.noneNote = el('div', 'as-note-b', 'Sans casque, l’instru sort des haut-parleurs et sera captée par le micro : elle se retrouvera dans ta prise. Le retour micro est coupé.');
+    c2.appendChild(u.btNote); c2.appendChild(u.noneNote);
+    var fine = el('button', 'as-link', 'Réglage fin (latence, calibrage)');
+    fine.type = 'button';
+    fine.addEventListener('click', function () { toggleSheet(true); });
+    c2.appendChild(fine);
+
+    // 3. Enregistre
+    var c3 = card(box, 3, 'Enregistre');
+    u.step3 = c3;
+    u.recIdle = el('div', 'as-stack');
+    var rOpt = el('div', 'as-opts');
+    u.count = el('button', 'as-sw');
+    u.count.type = 'button';
+    u.count.setAttribute('role', 'switch');
+    u.count.innerHTML = '<span class="as-swk"></span><span>Décompte (1 mesure)</span>';
+    u.count.addEventListener('click', function () { st.booth.count = !st.booth.count; markDirty(); renderBooth(); });
+    rOpt.appendChild(u.count);
+    var rStart = el('div', 'as-opts');
+    rStart.appendChild(el('span', 'as-lbl', 'Départ'));
+    u.startZero = pchip(rStart, 'Début du morceau', function () { st.booth.start = 'zero'; markDirty(); renderBooth(); });
+    u.startHere = pchip(rStart, 'Position actuelle', function () { st.booth.start = 'here'; markDirty(); renderBooth(); });
+    var rBpm = el('div', 'as-opts');
+    rBpm.appendChild(el('span', 'as-lbl', 'Tempo (BPM)'));
+    u.bpm = inp('number', 'as-num');
+    u.bpm.min = 20; u.bpm.max = 300; u.bpm.step = 1;
+    u.bpm.setAttribute('aria-label', 'Tempo en BPM');
+    u.bpm.addEventListener('change', function () {
+      st.bpm = clamp(Math.round(+u.bpm.value) || 120, 20, 300);
+      markDirty(); renderAll();
+    });
+    rBpm.appendChild(u.bpm);
+    u.recWrap = el('div', 'as-recwrap');
+    u.ring = el('div', 'as-ring');
+    u.recBtn = el('button', 'as-recbig');
+    u.recBtn.type = 'button';
+    u.recBtn.innerHTML = icon('rec');
+    u.recBtn.setAttribute('aria-label', 'Enregistrer');
+    u.recBtn.addEventListener('click', function () { boothRec(); });
+    u.recWrap.appendChild(u.ring); u.recWrap.appendChild(u.recBtn);
+    u.recLbl = el('div', 'as-recl', 'Enregistrer');
+    u.recIdle.appendChild(rOpt); u.recIdle.appendChild(rStart); u.recIdle.appendChild(rBpm);
+    u.recIdle.appendChild(u.recWrap); u.recIdle.appendChild(u.recLbl);
+    c3.appendChild(u.recIdle);
+    // Pendant la prise : carte « ON AIR »
+    u.recLive = el('div', 'as-stack'); u.recLive.hidden = true;
+    u.cd = el('div', 'as-cd', ''); u.cd.hidden = true;
+    u.chrono = el('div', 'as-chrono', '00:00');
+    u.lw = el('canvas', 'as-lw');
+    var pg = el('div', 'as-prog');
+    u.prog = el('div', 'as-prog-f');
+    pg.appendChild(u.prog);
+    u.stopBtn = el('button', 'as-stopbig');
+    u.stopBtn.type = 'button';
+    u.stopBtn.innerHTML = icon('stop') + '<span>Stop</span>';
+    u.stopBtn.setAttribute('aria-label', 'Arrêter l’enregistrement');
+    u.stopBtn.addEventListener('click', function () { toggleRecord(); });
+    u.recLive.appendChild(u.cd); u.recLive.appendChild(u.chrono); u.recLive.appendChild(u.lw);
+    u.recLive.appendChild(pg); u.recLive.appendChild(u.stopBtn);
+    c3.appendChild(u.recLive);
+    // Carte de la dernière prise
+    u.takeCard = el('div', 'as-takec'); u.takeCard.hidden = true;
+    u.takeTitle = el('div', 'as-takec-h', '');
+    u.takeCard.appendChild(u.takeTitle);
+    var tg = el('div', 'as-tgrid');
+    u.tkListen = cbtn(tg, 'play', 'Écouter', '', function () { var tk = takeById(st.booth.lastId); if (tk) boothListen(tk); });
+    u.tkKeep = cbtn(tg, 'check', 'Garder', 'keep', function () { var tk = takeById(st.booth.lastId); if (tk) boothKeep(tk); });
+    u.tkRedo = cbtn(tg, 'retry', 'Refaire', '', function () { var tk = takeById(st.booth.lastId); if (tk) boothRedo(tk); });
+    u.tkDel = cbtn(tg, 'trash', 'Supprimer', 'danger', function () { var tk = takeById(st.booth.lastId); if (tk) boothDelete(tk); });
+    u.takeCard.appendChild(tg);
+    var cal = el('div', 'as-cal');
+    cal.appendChild(el('span', 'as-mlbl', 'Calage voix'));
+    u.calR = inp('range', 'as-br');
+    u.calR.min = -200; u.calR.max = 200; u.calR.step = 5;
+    u.calR.setAttribute('aria-label', 'Calage voix en millisecondes');
+    u.calV = el('span', 'as-mval', '0 ms');
+    cal.appendChild(u.calR); cal.appendChild(u.calV);
+    u.takeCard.appendChild(cal);
+    u.takeCard.appendChild(el('div', 'as-note', 'Décale la voix par rapport à l’instru (± 200 ms). Écoute en direct possible.'));
+    u.calR.addEventListener('input', function () {
+      var tk = takeById(st.booth.lastId); if (!tk) return;
+      nudgeTake(tk, +u.calR.value);
+      u.calV.textContent = msText(tk.nudge);
+      reloadPlayback();
+    });
+    u.calR.addEventListener('change', function () { if (takeById(st.booth.lastId)) edited('Calage voix'); });
+    c3.appendChild(u.takeCard);
+    // Mes prises
+    c3.appendChild(el('div', 'as-sub', 'Mes prises'));
+    u.tl = el('div', 'as-tl');
+    u.tlEmpty = el('div', 'as-note', 'Aucune prise pour l’instant. Chaque prise s’ajoute ici.');
+    c3.appendChild(u.tl); c3.appendChild(u.tlEmpty);
+
+    // 4. Mixe et exporte
+    var c4 = card(box, 4, 'Mixe et exporte');
+    c4.appendChild(el('div', 'as-sub', 'Effet voix'));
+    var pr = el('div', 'as-opts');
+    [['none', 'Aucun'], ['studio', 'Studio'], ['radio', 'Radio'], ['echo', 'Écho']].forEach(function (d) {
+      u.presets[d[0]] = pchip(pr, d[1], function () { applyPreset(d[0]); });
+    });
+    c4.appendChild(pr);
+    u.fVoice = vrow(c4, 'Voix', 0, 100, 1);
+    u.fInst = vrow(c4, 'Instru', 0, 100, 1);
+    u.fVoice.r.addEventListener('input', function () {
+      var t = voiceTrack(); if (!t) return;
+      setPct(t, +u.fVoice.r.value); u.fVoice.v.textContent = pctOf(t) + ' %';
+    });
+    u.fVoice.r.addEventListener('change', function () { pushHistory('Volume voix'); });
+    u.fInst.r.addEventListener('input', function () {
+      var t = instruTrack(); if (!t) return;
+      setPct(t, +u.fInst.r.value); u.fInst.v.textContent = pctOf(t) + ' %';
+    });
+    u.fInst.r.addEventListener('change', function () { pushHistory('Volume instru'); });
+    var acts = el('div', 'as-acts');
+    cbtn(acts, 'play', 'Écouter le résultat', 'xl', function () { if (st.recording) return; stopPreview(); seek(0); play(); });
+    cbtn(acts, 'export', 'Exporter', 'xl', function () { exportMix(); });
+    cbtn(acts, 'wave', 'Ouvrir l’éditeur', 'xl', function () { showTab('edit'); });
+    c4.appendChild(acts);
+
+    p.appendChild(win);
+  }
+  function renderTakeCard() {
+    var u = st.ui, tk = takeById(st.booth.lastId);
+    u.takeCard.hidden = !tk || st.recording;
+    if (!tk) return;
+    u.takeTitle.textContent = 'Prise ' + tk.num + ' · ' + fmtDur(tk.buffer.duration);
+    var act = isActive(tk);
+    u.calR.disabled = !act;
+    u.tkListen.disabled = !act;
+    if (document.activeElement !== u.calR) u.calR.value = tk.nudge || 0;
+    u.calV.textContent = msText(tk.nudge || 0);
+  }
+  // Liste « Mes prises » : reconstruite seulement si son contenu change
+  function renderTakeList(voice) {
+    var u = st.ui, list = voice ? takesOf(voice.id) : [];
+    var sig = st.booth.prevId + '|' + list.map(function (k) { return k.id + (isActive(k) ? '1' : '0'); }).join(',');
+    if (sig === u.tlSig) return;
+    u.tlSig = sig;
+    u.tl.innerHTML = '';
+    u.tlEmpty.hidden = list.length > 0;
+    list.forEach(function (tk) {
+      var on = isActive(tk), row = el('div', 'as-tlrow' + (on ? ' on' : '')), info = el('div', 'as-tlinfo');
+      info.appendChild(el('div', 'as-tln', 'Prise ' + tk.num));
+      info.appendChild(el('div', 'as-tlm', fmtDur(tk.buffer.duration) + ' · ' + clockOf(tk.at)));
+      row.appendChild(info);
+      cbtn(row, st.booth.prevId === tk.id ? 'pause' : 'play', 'Écouter', 'sm', function () { previewTake(tk); });
+      if (on) row.appendChild(el('span', 'as-pill ok', 'Active'));
+      else cbtn(row, 'check', 'Utiliser', 'sm', function () { useTakeUI(tk); });
+      u.tl.appendChild(row);
+    });
+  }
+  function renderBooth() {
+    var u = st.ui;
+    if (!u.boothWin) return;
+    var b = st.booth, voice = voiceTrack(), instru = instruTrack(), ic = instru ? firstClipOf(instru) : null;
+    u.iEmpty.hidden = !!ic; u.iFull.hidden = !ic;
+    u.acapNote.hidden = !b.acap;
+    if (ic) {
+      u.iName.textContent = ic.name;
+      u.iMeta.textContent = fmtDur(ic.buffer.duration);
+      if (u.miniFor !== ic.buffer) { u.miniFor = ic.buffer; drawMini(u.mini, ic.buffer); }
+      setIcon(u.iPlay, st.playing ? 'pause' : 'play');
+      u.iPlay._lbl.textContent = st.playing ? 'Pause' : 'Écouter';
+    }
+    syncVol(u.iVol, instru);
+    Object.keys(u.hp).forEach(function (k) {
+      var on = b.hp === k;
+      u.hp[k].classList.toggle('on', on);
+      u.hp[k].setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    u.btNote.hidden = b.hp !== 'bt';
+    u.noneNote.hidden = b.hp !== 'none';
+    var mp = micPill();
+    setPill(u.bMic, mp[0], mp[1]);
+    setPill(u.bHp, b.hp ? 'ok' : '', b.hp ? HEADSETS[b.hp].t : 'Casque : à choisir');
+    var rec = st.recording;
+    u.recIdle.hidden = rec; u.recLive.hidden = !rec;
+    u.step3.classList.toggle('as-onair', rec);
+    u.recBtn.disabled = st.recPending || st.sess.pending;
+    u.recLbl.textContent = st.recPending ? 'Ouverture du micro…' : (st.sess.pending ? 'Session à trancher' : 'Enregistrer');
+    u.count.classList.toggle('on', b.count);
+    u.count.setAttribute('aria-checked', b.count ? 'true' : 'false');
+    u.startZero.classList.toggle('on', b.start === 'zero');
+    u.startHere.classList.toggle('on', b.start !== 'zero');
+    if (document.activeElement !== u.bpm) u.bpm.value = st.bpm;
+    renderTakeCard();
+    renderTakeList(voice);
+    var pr = presetOf(voice);
+    Object.keys(u.presets).forEach(function (k) { u.presets[k].classList.toggle('on', pr === k); });
+    syncVol(u.fVoice, voice);
+    syncVol(u.fInst, instru);
+  }
+  // Mini forme d'onde de l'instru (étape 1)
+  function drawMini(cv, buf) {
+    var W = Math.max(2, Math.round(cv.clientWidth)), H = 56, mid = H / 2;
+    cv.width = W; cv.height = H;
+    var g = cv.getContext('2d'), p = getPeaks(buf);
+    g.clearRect(0, 0, W, H);
+    g.fillStyle = 'rgba(192,132,252,0.85)';
+    for (var x = 0; x < W; x++) {
+      var b0 = Math.floor(x * p.n / W), b1 = Math.max(b0 + 1, Math.floor((x + 1) * p.n / W)), mn = 0, mx = 0;
+      for (var b = b0; b < b1 && b < p.n; b++) { if (p.mins[b] < mn) mn = p.mins[b]; if (p.maxs[b] > mx) mx = p.maxs[b]; }
+      var y1 = mid - clamp(mx, 0, 1) * mid * 0.9, y2 = mid - clamp(mn, -1, 0) * mid * 0.9;
+      g.fillRect(x, y1, 1, Math.max(1, y2 - y1));
+    }
+  }
+  // Forme d'onde de la voix en direct : dernières secondes, aggrégées par colonne
+  function drawLiveBooth(cv) {
+    var W = Math.max(2, Math.round(cv.clientWidth)), H = 72, mid = H / 2, pk = rx.pk, nb = pk.length / 2, per = 4;
+    if (cv.width !== W) cv.width = W;
+    if (cv.height !== H) cv.height = H;
+    var g = cv.getContext('2d');
+    g.clearRect(0, 0, W, H);
+    g.fillStyle = 'rgba(255,255,255,0.85)';
+    var start = nb - W * per;
+    for (var x = 0; x < W; x++) {
+      var b0 = start + x * per;
+      if (b0 < 0) continue;
+      if (b0 >= nb) break;
+      var mn = 0, mx = 0;
+      for (var k = 0; k < per; k++) {
+        var bi = b0 + k;
+        if (bi >= nb) break;
+        if (pk[bi * 2] < mn) mn = pk[bi * 2];
+        if (pk[bi * 2 + 1] > mx) mx = pk[bi * 2 + 1];
+      }
+      var y1 = mid - clamp(mx, 0, 1) * mid * 0.92, y2 = mid - clamp(mn, -1, 0) * mid * 0.92;
+      g.fillRect(x, y1, 1, Math.max(1, y2 - y1));
+    }
+  }
+  // Mise à jour rapide pendant l'affichage de la Cabine (chaque image)
+  function boothTick() {
+    var u = st.ui;
+    if (!u.boothWin) return;
+    var c = st.ctx, now = c ? c.currentTime : 0;
+    u.bTime.textContent = fmtTime(c && st.playing ? currentPos() : st.playhead, false);
+    var lv = 0;
+    if (rx.stream && rx.an && rx.buf) {
+      rx.an.getFloatTimeDomainData(rx.buf);
+      var pk = 0, i;
+      for (i = 0; i < rx.buf.length; i++) { var a = rx.buf[i] < 0 ? -rx.buf[i] : rx.buf[i]; if (a > pk) pk = a; }
+      lv = pk > 0 ? clamp((20 * Math.log10(pk) + 60) / 60, 0, 1) : 0;
+    }
+    u.recWrap.style.setProperty('--lvl', lv.toFixed(3));
+    if (st.recording && rx.take) {
+      var tk = rx.take, left = tk.startAt - now, beat = beatLen();
+      if (tk.cd > 0 && left > 0) {
+        u.cd.hidden = false;
+        u.cd.textContent = String(Math.min(tk.cd, Math.max(1, Math.ceil(left / beat - 1e-6))));
+        u.chrono.textContent = '00:00';
+      } else {
+        u.cd.hidden = true;
+        u.chrono.textContent = fmtTime(Math.max(0, now - tk.startAt), false);
+      }
+      drawLiveBooth(u.lw);
+      u.prog.style.width = (clamp(currentPos() / Math.max(1, projectEnd()), 0, 1) * 100).toFixed(2) + '%';
+    }
+  }
+  // Affichage de la Cabine : pastilles, « Sauvegardé ✓ »
+  function setSaved(txt) {
+    if (st.ui.saved) st.ui.saved.textContent = txt;
+    if (st.ui.bSaved) st.ui.bSaved.textContent = txt;
+  }
+  function buildSessBanner(p) {
+    var b = el('div', 'as-banner as-info-box as-sessb');
+    b.hidden = true;
+    st.ui.sess = b;
+    p.appendChild(b);
+  }
+
+  // ---------- Sauvegarde automatique (IndexedDB « studio-fusion-audio ») ----------
+  var DB_NAME = 'studio-fusion-audio';
+  // Transaction : fn reçoit tx ; la promesse se résout à la fin de la transaction
+  function idb(stores, mode, fn) {
+    return new Promise(function (resolve, reject) {
+      if (!window.indexedDB) { reject(new Error('IndexedDB indisponible')); return; }
+      var rq;
+      try { rq = window.indexedDB.open(DB_NAME, 1); } catch (e) { reject(e); return; }
+      rq.onupgradeneeded = function () {
+        var d = rq.result;
+        if (!d.objectStoreNames.contains('session')) d.createObjectStore('session');
+        if (!d.objectStoreNames.contains('buffers')) d.createObjectStore('buffers');
+      };
+      rq.onerror = function () { reject(rq.error || new Error('ouverture de la base impossible')); };
+      rq.onblocked = function () { reject(new Error('base bloquée par un autre onglet')); };
+      rq.onsuccess = function () {
+        var db = rq.result, tx;
+        db.onversionchange = function () { db.close(); };
+        try { tx = db.transaction(stores, mode); fn(tx); }
+        catch (e) { db.close(); reject(e); return; }
+        tx.oncomplete = function () { db.close(); resolve(); };
+        tx.onerror = function () { db.close(); reject(tx.error || new Error('écriture impossible')); };
+        tx.onabort = function () { db.close(); reject(tx.error || new Error('transaction annulée (espace insuffisant ?)')); };
+      };
+    });
+  }
+  // Instantané sérialisable : les buffers sont remplacés par une clé (bk) ; keys reçoit les buffers utilisés
+  function packState(keys) {
+    function ref(buf) {
+      var k = pBuf.get(buf);
+      if (!k) { st.sess.seq += 1; k = 'b' + st.sess.seq; pBuf.set(buf, k); }
+      keys[k] = buf;
+      return k;
+    }
+    var clips = st.clips.map(function (c) {
+      return { id: c.id, trackId: c.trackId, name: c.name, start: c.start, offset: c.offset, duration: c.duration,
+        fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null, bk: ref(c.buffer) };
+    });
+    var takes = st.takes.map(function (k) {
+      var o = {};
+      Object.keys(k).forEach(function (f) { if (f !== 'buffer') o[f] = k[f]; });
+      o.bk = ref(k.buffer);
+      return o;
+    });
+    return {
+      bpm: st.bpm, masterDb: st.masterDb, curve: st.curve, mode: st.mode, pxPerSec: st.pxPerSec,
+      takeSeq: st.takeSeq, nextId: st.nextId, armedId: st.armedId,
+      tracks: cloneP(st.tracks), clips: clips, takes: takes,
+      mic: { countIn: st.mic.countIn, instru: st.mic.instru },
+      booth: { count: st.booth.count, start: st.booth.start, lastId: st.booth.lastId, acap: st.booth.acap }
+    };
+  }
+  function markDirty() {
+    if (!st.root || st.sess.pending || !st.sess.ok) return;
+    clearTimeout(st.sess.t);
+    st.sess.t = setTimeout(function () { st.sess.t = null; saveNow(); }, 1500);
+  }
+  function saveNow() {
+    if (!st.root || st.sess.pending || !st.sess.ok) return Promise.resolve(false);
+    if (st.sess.busy) { st.sess.again = true; return st.sess.busy; }
+    var keys = {}, state = packState(keys), key = JSON.stringify(state);
+    if (key === st.sess.lastKey) return Promise.resolve(true);
+    var writes = [], dels = [], k;
+    for (k in keys) if (!st.sess.saved[k]) writes.push(k);
+    st.sess.bufs.forEach(function (x) { if (!keys[x]) dels.push(x); });
+    var rec = { savedAt: Date.now(), state: state, bufs: Object.keys(keys) };
+    st.sess.busy = idb(['session', 'buffers'], 'readwrite', function (tx) {
+      var bs = tx.objectStore('buffers');
+      writes.forEach(function (w) {
+        var b = keys[w], ch = [];
+        for (var i = 0; i < b.numberOfChannels; i++) ch.push(b.getChannelData(i));
+        bs.put({ sr: b.sampleRate, ch: ch }, w);
+      });
+      dels.forEach(function (d) { bs.delete(d); });
+      tx.objectStore('session').put(rec, 'current');
+    }).then(function () {
+      writes.forEach(function (w) { st.sess.saved[w] = true; });
+      dels.forEach(function (d) { delete st.sess.saved[d]; });
+      st.sess.bufs = rec.bufs; st.sess.lastKey = key;
+      setSaved('Sauvegardé ✓ ' + clockOf(Date.now()));
+      return true;
+    }, function (err) {
+      showBanner('Sauvegarde impossible (' + ((err && err.message) || (err && err.name) || 'erreur') + '). La session reste ouverte mais ne sera pas conservée. Libérez de l’espace ou quittez la navigation privée.', 'err', null);
+      setSaved('Non sauvegardé');
+      return false;
+    }).then(function (ok) {
+      st.sess.busy = null;
+      if (st.sess.again) { st.sess.again = false; return saveNow(); }
+      return ok;
+    });
+    return st.sess.busy;
+  }
+  function flushSave() {
+    if (st.sess.t) { clearTimeout(st.sess.t); st.sess.t = null; }
+    if (!st.sess.pending) saveNow();
+  }
+  function onHide() { if (document.hidden) flushSave(); }
+  function sessError(err) {
+    st.sess.ok = false;
+    showBanner('Sauvegarde automatique indisponible (' + ((err && err.message) || (err && err.name) || 'erreur') + '). La session ne sera pas conservée.', 'err', null);
+    setSaved('Sauvegarde indisponible');
+  }
+  // Au démarrage : une session existante doit être reprise ou écartée avant toute sauvegarde
+  function checkSession() {
+    var rq = null;
+    idb(['session'], 'readonly', function (tx) { rq = tx.objectStore('session').get('current'); }).then(function () {
+      var rec = rq && rq.result;
+      if (rec && rec.state && ((rec.state.tracks || []).length || (rec.state.clips || []).length)) {
+        st.sess.found = rec; st.sess.pending = true;
+        showSessBanner('ask');
+        setSaved('Choisis une session pour activer la sauvegarde');
+        renderBooth();
+      } else {
+        setSaved('Sauvegarde automatique active');
+      }
+    }, sessError);
+  }
+  function hideSess() { if (st.ui.sess) { st.ui.sess.hidden = true; st.ui.sess.innerHTML = ''; } }
+  function showSessBanner(stage) {
+    var b = st.ui.sess, f = st.sess.found;
+    if (!b || !f) return;
+    var S = f.state || {}, nT = (S.tracks || []).length, nK = (S.takes || []).length, when = fmtDate(f.savedAt);
+    b.innerHTML = '';
+    b.hidden = false;
+    var txt = stage === 'confirm'
+      ? 'Effacer définitivement la session du ' + when + ' ? Cette action est irréversible.'
+      : 'Reprendre ta session du ' + when + ' (' + nT + ' piste' + (nT > 1 ? 's' : '') + ', ' + nK + ' prise' + (nK > 1 ? 's' : '') + ') ?';
+    b.appendChild(el('span', 'as-banner-txt', txt));
+    var acts = el('div', 'as-banner-acts');
+    if (stage === 'confirm') {
+      tbtn(acts, 'Effacer définitivement', 'Effacer la session sauvegardée', clearSession, 'as-danger');
+      tbtn(acts, 'Annuler', 'Revenir au choix', function () { showSessBanner('ask'); });
+    } else {
+      tbtn(acts, 'Reprendre', 'Reprendre la session sauvegardée', restoreSession, 'on');
+      tbtn(acts, 'Nouvelle session', 'Commencer une nouvelle session (confirmation demandée)', function () { showSessBanner('confirm'); });
+    }
+    b.appendChild(acts);
+  }
+  function maxSeq(keys) {
+    var m = 0;
+    (keys || []).forEach(function (k) { var n = parseInt(String(k).slice(1), 10); if (n > m) m = n; });
+    return m;
+  }
+  function restoreSession() {
+    var f = st.sess.found;
+    if (!f) return;
+    var ctx = getCtx(), keys = f.bufs || [], got = {};
+    idb(['buffers'], 'readonly', function (tx) {
+      var s = tx.objectStore('buffers');
+      keys.forEach(function (k) { s.get(k).onsuccess = function (e) { got[k] = e.target.result; }; });
+    }).then(function () {
+      var map = {}, S = f.state;
+      keys.forEach(function (k) {
+        var g = got[k];
+        if (!g || !g.ch || !g.ch.length) return;
+        var b = ctx.createBuffer(g.ch.length, g.ch[0].length, g.sr);
+        g.ch.forEach(function (a, i) { b.copyToChannel(a, i); });
+        map[k] = b; pBuf.set(b, k); st.sess.saved[k] = true;
+      });
+      function fix(list) {
+        return (list || []).filter(function (o) { return map[o.bk]; }).map(function (o) {
+          var r = Object.assign({}, o); r.buffer = map[o.bk]; delete r.bk; return r;
+        });
+      }
+      st.masterDb = S.masterDb; st.bpm = S.bpm; st.curve = S.curve; st.mode = S.mode; st.pxPerSec = S.pxPerSec;
+      st.takeSeq = S.takeSeq; st.nextId = Math.max(st.nextId, S.nextId);
+      st.tracks = S.tracks;
+      st.clips = fix(S.clips);
+      st.takes = fix(S.takes);
+      st.armedId = null; st.selClip = null; st.selTrack = null; st.selRange = null; st.spot = null; st.insSel = null;
+      st.mic.countIn = S.mic.countIn; st.mic.instru = S.mic.instru;
+      st.booth.count = S.booth.count; st.booth.start = S.booth.start; st.booth.acap = S.booth.acap;
+      st.booth.lastId = takeById(S.booth.lastId) ? S.booth.lastId : null;
+      st.sess.seq = Math.max(st.sess.seq, maxSeq(keys));
+      st.sess.bufs = Object.keys(map);
+      st.sess.lastKey = '';
+      st.sess.pending = false; st.sess.found = null;
+      st.undo = []; st.redo = [];
+      st.last = snapshot(); st.lastSer = serial(st.last);
+      hideSess();
+      renderAll();
+      updateHistBtns();
+      setStatus('Session reprise : ' + st.tracks.length + ' piste(s), ' + st.takes.length + ' prise(s).');
+      setSaved('Session reprise');
+      var missing = (S.clips || []).length - st.clips.length + (S.takes || []).length - st.takes.length;
+      if (missing > 0) showBanner(missing + ' élément(s) audio introuvable(s) dans la sauvegarde.', 'err', null);
+    }).catch(function (err) {
+      showBanner('Reprise impossible (' + ((err && err.message) || 'erreur') + '). La session sauvegardée est conservée.', 'err', null);
+      showSessBanner('ask');
+    });
+  }
+  function clearSession() {
+    idb(['session', 'buffers'], 'readwrite', function (tx) {
+      tx.objectStore('session').clear();
+      tx.objectStore('buffers').clear();
+    }).then(function () {
+      pBuf = new WeakMap();
+      st.sess.pending = false; st.sess.found = null; st.sess.saved = {}; st.sess.bufs = []; st.sess.lastKey = '';
+      st.tracks = []; st.clips = []; st.takes = [];
+      st.selClip = null; st.selTrack = null; st.selRange = null; st.armedId = null;
+      st.booth.lastId = null;
+      st.undo = []; st.redo = [];
+      st.last = snapshot(); st.lastSer = serial(st.last);
+      hideSess();
+      renderAll();
+      updateHistBtns();
+      setSaved('Nouvelle session');
+      setStatus('Nouvelle session : projet vide.');
+    }, function (err) {
+      showSessBanner('ask');
+      showBanner('Effacement impossible (' + ((err && err.message) || 'erreur') + ').', 'err', null);
+    });
+  }
+
   // ---------- Clavier et gestes ----------
   function bindKeys() {
     function active() { return st.root && st.root.offsetParent !== null && (!window.__sfFocus || window.__sfFocus === 'audio'); }
@@ -5739,6 +7301,7 @@ select.ie-in{width:auto}
     st.pxPerSec = pps;
     st.anchor = { t: pinch.t, mx: pinch.mx };
     st.redraw = true;
+    kick();
   }
 
   // ---------- Fichiers, génération, export ----------
@@ -5853,14 +7416,17 @@ select.ie-in{width:auto}
     rootEl.appendChild(style);
     var wrap = el('div', 'as-root');
     rootEl.appendChild(wrap);
+    st.ui.wrap = wrap;
     st.ui.hMeters = {};
     st.ui.meters = {};
     bindNarrow();
     buildTransport(wrap);
     buildBanner(wrap);
+    buildSessBanner(wrap);
     buildFileBar(wrap);
     buildGenPanel(wrap);
     buildTabs(wrap);
+    buildBooth(wrap);
     buildEditWin(wrap);
     buildMixWin(wrap);
     buildSheet(wrap);
@@ -5868,17 +7434,23 @@ select.ie-in{width:auto}
     bindUnlock();
     bindDevices();
     bindPinch(st.ui.scroller);
-    if (!st.frameOn) { st.frameOn = true; requestAnimationFrame(frame); }
     st.pending.splice(0).forEach(function (p) { addTrackWithClip(p[0], p[1]); });
     st.last = snapshot(); st.lastSer = serial(st.last);
     st.mic.latency = loadLatency();
-    showTab('edit');
+    st.booth.hp = loadHP();
+    showTab(st.narrow ? 'booth' : 'edit');
     updateHistBtns();
+    document.addEventListener('visibilitychange', onHide);
+    window.addEventListener('pagehide', flushSave);
+    checkSession();
   }
 
   // ---------- API publique ----------
   window.AudioStudio = {
     init: init,
+    // Affiche une vue : 'booth' (Cabine), 'edit' (Édition) ou 'mix' (Mixage)
+    showView: function (name) { if (st.root && (name === 'booth' || name === 'edit' || name === 'mix')) showTab(name); },
+    saveNow: function () { return saveNow(); },
     addClipFromBuffer: function (audioBuffer, name) {
       var n = name || ('Clip ' + st.nextId);
       if (!st.root) { st.pending.push([audioBuffer, n]); return; }
@@ -5906,7 +7478,12 @@ select.ie-in{width:auto}
         nodeMode: rx.nodeMode,
         lastTake: rx.lastTake ? { name: rx.lastTake.label, duration: rx.lastTake.duration, instru: rx.lastTake.instru, srcs: rx.lastTake.srcs, lat: rx.lastTake.lat } : null,
         calT0: rx.cal ? rx.cal.t0 : null,
-        calib: rx.calVal
+        calib: rx.calVal,
+        view: st.tab,
+        frameOn: st.frameOn,
+        headset: st.booth.hp,
+        takes: st.takes.map(function (k) { return { id: k.id, trackId: k.trackId, num: k.num, dur: k.buffer.duration, active: isActive(k) }; }),
+        session: { pending: st.sess.pending, saved: Object.keys(st.sess.saved).length, bufs: st.sess.bufs.length }
       };
     }
   };
@@ -5962,12 +7539,14 @@ select.ie-in{width:auto}
   $('sf-helpbtn').onclick = ()=> $('sf-help').classList.add('on');
   $('sf-help').onclick = ()=> $('sf-help').classList.remove('on');
 
-  // --- Image -> Son : synthèse additive spectrale ---
-  function sonify(imageData, seconds, sampleRate){
-    const W = imageData.width, H = imageData.height, d = imageData.data;
-    const BANDS = 96;                       // nombre de fréquences
-    const COLS = Math.min(W, 400);          // résolution temporelle
-    const fMin = 60, fMax = 9000;
+  // --- Calcul lourd : noyaux purs ---
+  // Chaque noyau est une fonction autonome (aucune variable de fermeture) : son source est recopié
+  // dans le Worker (URL Blob). Il est exécuté soit dans le Worker, soit par tranches sur le thread principal.
+
+  // Image -> son : oscillateurs à récurrence (rotation complexe, sans Math.sin par échantillon),
+  // amplitude interpolée linéairement sur des blocs de 64 échantillons.
+  function* sonifyKernel(px, W, H, seconds, sampleRate){
+    const BANDS = 96, COLS = Math.min(W, 400), fMin = 60, fMax = 9000, BLOCK = 64;
     // Matrice d'amplitudes [bande][colonne] = luminosité moyenne * alpha
     const amp = new Float32Array(BANDS*COLS);
     for (let b=0;b<BANDS;b++){
@@ -5977,28 +7556,41 @@ select.ie-in{width:auto}
         let s=0, n=0;
         for (let y=y0;y<y1;y+=Math.max(1,(y1-y0)>>2)) for (let x=x0;x<x1;x+=Math.max(1,(x1-x0)>>2)){
           const i=(y*W+x)*4;
-          s += ((0.299*d[i]+0.587*d[i+1]+0.114*d[i+2])/255)*(d[i+3]/255); n++;
+          s += ((0.299*px[i]+0.587*px[i+1]+0.114*px[i+2])/255)*(px[i+3]/255); n++;
         }
         const v = n? s/n : 0;
         amp[b*COLS+c] = v*v;                 // courbe pour faire ressortir les zones claires
       }
+      yield b/BANDS*0.1;
     }
     const len = Math.floor(seconds*sampleRate);
     const out = new Float32Array(len);
+    const colScale = (COLS-1)/len;
+    const ampAt = (row, pos) => { const c=Math.floor(pos), t=pos-c; return row[c]*(1-t) + row[Math.min(c+1,COLS-1)]*t; };
     for (let b=0;b<BANDS;b++){
+      const row = amp.subarray(b*COLS, (b+1)*COLS);
+      let any=false; for (let c=0;c<COLS;c++) if (row[c]>0.002){ any=true; break; }
+      if (!any){ yield 0.1 + 0.85*(b+1)/BANDS; continue; }
       const f = fMin*Math.pow(fMax/fMin, b/(BANDS-1));
       const w = 2*Math.PI*f/sampleRate;
-      const row = amp.subarray(b*COLS, (b+1)*COLS);
-      let any=false; for (let c=0;c<COLS;c++) if (row[c]>0.002){any=true;break;}
-      if (!any) continue;
-      let ph = Math.random()*Math.PI*2;
-      for (let i=0;i<len;i++){
-        const pos = i/len*(COLS-1), c=Math.floor(pos), t=pos-c;
-        const a = row[c]*(1-t) + row[Math.min(c+1,COLS-1)]*t;
-        if (a>0.0005) out[i] += a*Math.sin(ph);
-        ph += w;
+      const ph0 = Math.random()*Math.PI*2;
+      let cr = Math.cos(ph0), ci = Math.sin(ph0);   // ci = sin(phase courante)
+      const cw = Math.cos(w), sw = Math.sin(w);
+      for (let i0=0;i0<len;i0+=BLOCK){
+        const i1 = Math.min(len, i0+BLOCK);
+        const a0 = ampAt(row, i0*colScale), a1 = ampAt(row, (i1-1)*colScale);
+        if (a0 <= 0.0005 && a1 <= 0.0005){
+          for (let i=i0;i<i1;i++){ const t=cr*cw-ci*sw; ci=ci*cw+cr*sw; cr=t; }
+        } else {
+          const da = i1-1 > i0 ? (a1-a0)/(i1-1-i0) : 0;
+          let a = a0;
+          for (let i=i0;i<i1;i++){ out[i]+=a*ci; a+=da; const t=cr*cw-ci*sw; ci=ci*cw+cr*sw; cr=t; }
+        }
+        const nrm = 1/Math.sqrt(cr*cr+ci*ci); cr*=nrm; ci*=nrm;   // recalage de la rotation
+        if ((i0 & 0x3FFF)===0) yield 0.1 + 0.85*(b + i0/len)/BANDS;
       }
     }
+    yield 0.95;
     // Normalisation + micro-fondus
     let peak=0; for (let i=0;i<len;i++){ const v=Math.abs(out[i]); if(v>peak) peak=v; }
     const g = peak>0 ? 0.85/peak : 0, fade = Math.floor(0.01*sampleRate);
@@ -6009,16 +7601,185 @@ select.ie-in{width:auto}
     return out;
   }
 
+  // Son -> image : spectrogramme. FFT radix-2 avec table de bits inversés et de twiddles,
+  // fenêtre de Hann précalculée, index de fréquence calculé une fois par hauteur,
+  // palette magma en table de 256 entrées.
+  function* spectroKernel(mono, sr, W, H){
+    const N = 2048, half = N>>1, total = mono.length, range = 80;
+    const fMin = 60, fMax = Math.min(9000, sr/2), span = Math.max(1, H-1);
+    const win = new Float64Array(N);
+    for (let i=0;i<N;i++) win[i] = 0.5-0.5*Math.cos(2*Math.PI*i/(N-1));
+    const rev = new Uint32Array(N);
+    for (let i=1,j=0;i<N;i++){ let bit=N>>1; for(;j&bit;bit>>=1) j^=bit; j^=bit; rev[i]=j; }
+    const cT = new Float64Array(half), sT = new Float64Array(half);
+    for (let k=0;k<half;k++){ const a=-2*Math.PI*k/N; cT[k]=Math.cos(a); sT[k]=Math.sin(a); }
+    const kIdx = new Int32Array(H);
+    for (let y=0;y<H;y++){
+      const f = fMin*Math.pow(fMax/fMin, (H-1-y)/span);
+      kIdx[y] = Math.min(half-1, Math.round(f*N/sr));
+    }
+    const re = new Float64Array(N), im = new Float64Array(N);
+    const db = new Float32Array(W*H);            // colonne-major : db[x*H+y]
+    let maxDb = -200;
+    for (let x=0;x<W;x++){
+      const start = Math.floor(x/W*Math.max(1,total-N));
+      for (let i=0;i<N;i++){ const s=start+i; re[i] = s<total ? mono[s]*win[i] : 0; im[i]=0; }
+      for (let i=0;i<N;i++){ const j=rev[i]; if (i<j){ let t=re[i]; re[i]=re[j]; re[j]=t; t=im[i]; im[i]=im[j]; im[j]=t; } }
+      for (let len=2;len<=N;len<<=1){
+        const hl = len>>1, step = N/len;
+        for (let i=0;i<N;i+=len){
+          for (let k=0,t=0;k<hl;k++,t+=step){
+            const wr=cT[t], wi=sT[t], p=i+k, q=p+hl;
+            const vr=re[q]*wr-im[q]*wi, vi=re[q]*wi+im[q]*wr;
+            re[q]=re[p]-vr; im[q]=im[p]-vi; re[p]+=vr; im[p]+=vi;
+          }
+        }
+      }
+      for (let y=0;y<H;y++){
+        const k = kIdx[y];
+        const mag = Math.sqrt(re[k]*re[k]+im[k]*im[k]);
+        const v = 20*Math.log10(mag+1e-9);
+        db[x*H+y] = v; if (v>maxDb) maxDb = v;
+      }
+      yield 0.9*(x+1)/W;
+    }
+    // Palette magma précalculée (256 entrées, RGB)
+    const stops=[[0,0,4],[40,11,84],[140,41,129],[222,73,104],[254,159,109],[252,253,191]];
+    const pal = new Uint8ClampedArray(256*3);
+    for (let p=0;p<256;p++){
+      const t = p/255*(stops.length-1), i = Math.min(Math.floor(t), stops.length-2), f = t-i;
+      const a = stops[i], b = stops[i+1];
+      pal[p*3]   = a[0]+(b[0]-a[0])*f;
+      pal[p*3+1] = a[1]+(b[1]-a[1])*f;
+      pal[p*3+2] = a[2]+(b[2]-a[2])*f;
+    }
+    const out = new Uint8ClampedArray(W*H*4).fill(255);
+    const lo = maxDb-range;
+    for (let x=0;x<W;x++){
+      const base = x*H;
+      for (let y=0;y<H;y++){
+        let idx = Math.round((db[base+y]-lo)/range*255);
+        idx = idx<0 ? 0 : (idx>255 ? 255 : idx);
+        const o=(y*W+x)*4, c=idx*3;
+        out[o]=pal[c]; out[o+1]=pal[c+1]; out[o+2]=pal[c+2];
+      }
+      if ((x&63)===63) yield 0.9 + 0.1*(x+1)/W;
+    }
+    return out;
+  }
+
+  // Source du Worker : les deux noyaux + le gestionnaire de messages
+  const WORKER_SRC = [sonifyKernel, spectroKernel].map(f=>f.toString()).join('\n') + `
+self.onmessage = function (e) {
+  var m = e.data, gen, r, last = 0;
+  try {
+    gen = m.op === 'sonify' ? sonifyKernel.apply(null, m.args) : spectroKernel.apply(null, m.args);
+    for (;;) {
+      r = gen.next();
+      if (r.done) break;
+      if (Date.now() - last > 80) { last = Date.now(); self.postMessage({ p: r.value }); }
+    }
+    self.postMessage({ done: true, result: r.value }, [r.value.buffer]);
+  } catch (err) {
+    self.postMessage({ error: String((err && err.message) || err) });
+  }
+};
+self.postMessage({ ready: true });`;
+
+  function makeGen(op, args){
+    return op === 'sonify' ? sonifyKernel.apply(null, args) : spectroKernel.apply(null, args);
+  }
+  // Repli sans Worker : même noyau, exécuté par tranches d'environ 30 ms
+  async function runSliced(gen, onProgress, isCancelled){
+    let t0 = performance.now(), r;
+    for (;;){
+      if (isCancelled()) return null;
+      r = gen.next();
+      if (r.done) return r.value;
+      if (performance.now()-t0 > 30){
+        onProgress(r.value);
+        await new Promise(res=>setTimeout(res, 0));
+        t0 = performance.now();
+      }
+    }
+  }
+  // Lance un calcul dans un Worker ; repli par tranches si le Worker est indisponible ou ne démarre pas.
+  // Renvoie { promise, cancel() } ; la promesse vaut null si le calcul est annulé.
+  function runJob(op, args, transfers, onProgress){
+    let cancelled=false, settled=false, started=false, worker=null, url=null, timer=null;
+    let resolveP, rejectP;
+    const promise = new Promise((res,rej)=>{ resolveP=res; rejectP=rej; });
+    const cleanup = ()=>{
+      clearTimeout(timer);
+      if (worker){ worker.terminate(); worker=null; }
+      if (url){ URL.revokeObjectURL(url); url=null; }
+    };
+    const done = v=>{ if(settled) return; settled=true; cleanup(); resolveP(v); };
+    const fail = e=>{ if(settled) return; settled=true; cleanup(); rejectP(e); };
+    const job = { promise, cancel(){ cancelled=true; done(null); } };
+    const fallback = ()=>{
+      if (settled) return;
+      cleanup();
+      let gen;
+      try { gen = makeGen(op, args); } catch(e){ return fail(e); }
+      runSliced(gen, onProgress, ()=>cancelled).then(done, fail);
+    };
+    try{
+      if (typeof Worker === 'undefined') throw new Error('Worker indisponible');
+      url = URL.createObjectURL(new Blob([WORKER_SRC], { type:'text/javascript' }));
+      worker = new Worker(url);
+    }catch(e){
+      fallback();
+      return job;
+    }
+    worker.onmessage = e=>{
+      const m = e.data;
+      if (m.ready){ started=true; clearTimeout(timer); worker.postMessage({ op, args }, transfers); }
+      else if (m.p !== undefined) onProgress(m.p);
+      else if (m.done) done(m.result);
+      else if (m.error) fail(new Error(m.error));
+    };
+    worker.onerror = ev=>{
+      if (ev && ev.preventDefault) ev.preventDefault();
+      if (!started) fallback();
+      else fail(new Error((ev && ev.message) || 'erreur du calcul'));
+    };
+    timer = setTimeout(()=>{ if (!started) fallback(); }, 3000);
+    return job;
+  }
+
+  // --- Interface des calculs : barre de progression, Annuler, boutons désactivés ---
+  const prog = $('sf-prog'), cancelBtn = $('sf-cancel');
+  let activeJob = null;
+  function busy(on){
+    ['sf-sonify','sf-spectro','sf-dur'].forEach(id=>{ $(id).disabled = on; });
+    cancelBtn.hidden = !on;
+    prog.hidden = !on;
+    if (!on) prog.style.width = '0%';
+  }
+  function progress(label, p){
+    const pct = Math.round(Math.max(0, Math.min(1, p))*100);
+    status.textContent = label+' '+pct+' %';
+    prog.style.width = pct+'%';
+  }
+  cancelBtn.onclick = ()=>{ if (activeJob) activeJob.cancel(); };
+
+  // --- Image -> Son ---
   $('sf-sonify').onclick = async ()=>{
+    if (activeJob) return;
     try{
       const img = window.ImageEditor.getActiveLayerImageData();
       if (!img) return say('Aucun calque actif.', 4000);
       const secs = Math.min(30, Math.max(1, parseFloat($('sf-dur').value)||5));
-      say('Sonification en cours…');
-      await new Promise(r=>setTimeout(r,30));
       const ctx = window.AudioStudio.getContext();
       const sr = ctx.sampleRate;
-      const data = sonify(img, secs, sr);
+      say('Sonification en cours…');
+      const px = img.data;                       // copie fraîche de getImageData : transférable
+      activeJob = runJob('sonify', [px, img.width, img.height, secs, sr], [px.buffer], p=>progress('Sonification', p));
+      busy(true);
+      let data;
+      try { data = await activeJob.promise; } finally { activeJob = null; busy(false); }
+      if (!data) return say('Sonification annulée.', 4000);
       const buf = ctx.createBuffer(2, data.length, sr);
       buf.copyToChannel(data,0); buf.copyToChannel(data,1);
       window.AudioStudio.addClipFromBuffer(buf, 'Image sonifiée');
@@ -6027,73 +7788,51 @@ select.ie-in{width:auto}
     }catch(e){ console.error(e); say('Erreur : '+e.message, 6000); }
   };
 
-  // --- Son -> Image : spectrogramme (FFT) ---
-  function fft(re, im){
-    const n=re.length;
-    for (let i=1,j=0;i<n;i++){ let bit=n>>1; for(;j&bit;bit>>=1) j^=bit; j^=bit; if(i<j){[re[i],re[j]]=[re[j],re[i]];[im[i],im[j]]=[im[j],im[i]];} }
-    for (let len=2;len<=n;len<<=1){
-      const a=-2*Math.PI/len, wr=Math.cos(a), wi=Math.sin(a);
-      for (let i=0;i<n;i+=len){
-        let cr=1, ci=0;
-        for (let k=0;k<len/2;k++){
-          const ur=re[i+k], ui=im[i+k];
-          const vr=re[i+k+len/2]*cr-im[i+k+len/2]*ci, vi=re[i+k+len/2]*ci+im[i+k+len/2]*cr;
-          re[i+k]=ur+vr; im[i+k]=ui+vi; re[i+k+len/2]=ur-vr; im[i+k+len/2]=ui-vi;
-          const t=cr*wr-ci*wi; ci=cr*wi+ci*wr; cr=t;
-        }
-      }
-    }
-  }
-  function palette(t){ // dégradé type « magma »
-    const stops=[[0,0,4],[40,11,84],[140,41,129],[222,73,104],[254,159,109],[252,253,191]];
-    t=Math.max(0,Math.min(1,t))*(stops.length-1); const i=Math.floor(t), f=t-i, a=stops[i], b=stops[Math.min(i+1,stops.length-1)];
-    return [a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f];
-  }
-  function spectrogram(buffer, W, H){
-    const N=2048, sr=buffer.sampleRate;
-    const ch0=buffer.getChannelData(0), ch1=buffer.numberOfChannels>1?buffer.getChannelData(1):ch0;
-    const total=ch0.length, img=new ImageData(W,H), win=new Float32Array(N);
-    for (let i=0;i<N;i++) win[i]=0.5-0.5*Math.cos(2*Math.PI*i/(N-1));
-    const fMin=60, fMax=Math.min(9000, sr/2);
-    const re=new Float32Array(N), im=new Float32Array(N), cols=[];
-    let maxDb=-200;
-    for (let x=0;x<W;x++){
-      const start=Math.floor(x/W*Math.max(1,total-N));
-      for (let i=0;i<N;i++){ const s=start+i; re[i]= s<total ? (ch0[s]+ch1[s])*0.5*win[i] : 0; im[i]=0; }
-      fft(re,im);
-      const col=new Float32Array(H);
-      for (let y=0;y<H;y++){
-        const f=fMin*Math.pow(fMax/fMin,(H-1-y)/(H-1));
-        const k=Math.min(N/2-1, Math.round(f*N/sr));
-        const mag=Math.hypot(re[k],im[k]);
-        const db=20*Math.log10(mag+1e-9); col[y]=db; if(db>maxDb) maxDb=db;
-      }
-      cols.push(col);
-    }
-    const range=80;
-    for (let x=0;x<W;x++) for (let y=0;y<H;y++){
-      const c=palette((cols[x][y]-(maxDb-range))/range), i=(y*W+x)*4;
-      img.data[i]=c[0]; img.data[i+1]=c[1]; img.data[i+2]=c[2]; img.data[i+3]=255;
-    }
-    return img;
-  }
-
+  // --- Son -> Image ---
   $('sf-spectro').onclick = async ()=>{
+    if (activeJob) return;
     try{
       const sel = window.AudioStudio.getSelectedClipBuffer();
       if (!sel || !sel.buffer) { if (work.dataset.mode==='image') setMode('split'); return say('Sélectionnez d\'abord un clip dans l\'espace Audio.', 5000); }
+      const b = sel.buffer, sr = b.sampleRate, size = window.ImageEditor.getCanvasSize();
+      // Mixage mono en copie (le buffer de l'AudioBuffer ne doit pas être transféré)
+      const ch0 = b.getChannelData(0);
+      let mono;
+      if (b.numberOfChannels > 1){
+        const ch1 = b.getChannelData(1);
+        mono = new Float32Array(ch0.length);
+        for (let i=0;i<mono.length;i++) mono[i] = (ch0[i]+ch1[i])*0.5;
+      } else mono = ch0.slice();
       say('Calcul du spectrogramme…');
-      await new Promise(r=>setTimeout(r,30));
-      const size = window.ImageEditor.getCanvasSize();
-      const img = spectrogram(sel.buffer, size.width, size.height);
+      activeJob = runJob('spectro', [mono, sr, size.width, size.height], [mono.buffer], p=>progress('Spectrogramme', p));
+      busy(true);
+      let pix;
+      try { pix = await activeJob.promise; } finally { activeJob = null; busy(false); }
+      if (!pix) return say('Calcul du spectrogramme annulé.', 4000);
+      const img = new ImageData(pix, size.width, size.height);
       window.ImageEditor.addLayerFromImageData(img, 'Spectrogramme — '+(sel.name||'clip'));
       say('✓ Calque spectrogramme ajouté dans l\'espace Image.', 6000);
       if (work.dataset.mode==='audio') setMode('split');
     }catch(e){ console.error(e); say('Erreur : '+e.message, 6000); }
   };
 
-  // Ouvre l'aide au premier lancement
-  try { if (!localStorage.getItem('sf-help-seen')) { $('sf-help').classList.add('on'); localStorage.setItem('sf-help-seen','1'); } } catch(e){}
+  // --- Accueil : choix de l'activité, mode mémorisé ---
+  const store = { get(k){ try{return localStorage.getItem(k);}catch(e){return null;} }, set(k,v){ try{localStorage.setItem(k,v);}catch(e){} } };
+  const welcome = $('sf-welcome');
+  function go(target){
+    welcome.classList.remove('on');
+    if (target === 'last') target = store.get('sf-last') || 'booth';
+    if (target === 'booth'){ setMode('audio'); try{ window.AudioStudio.showView && window.AudioStudio.showView('booth'); }catch(e){} }
+    else setMode(target);
+    store.set('sf-last', target);
+  }
+  welcome.addEventListener('click', e=>{ const b=e.target.closest('[data-go]'); if (b) go(b.dataset.go); });
+  $('sf-logo').addEventListener('click', ()=> welcome.classList.add('on'));
+  $('sf-logo').addEventListener('keydown', e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); welcome.classList.add('on'); } });
+  $('sf-tabs').addEventListener('click', e=>{ const b=e.target.closest('button'); if (b) store.set('sf-last', b.dataset.mode); });
+  welcome.classList.add('on');
+  if (!store.get('sf-last')) welcome.querySelector('.skip').style.display='none';
+  document.addEventListener('keydown', e=>{ if (e.key==='Escape'){ $('sf-help').classList.remove('on'); if (welcome.classList.contains('on')) go('last'); } });
 })();
 </script>
 </body>
