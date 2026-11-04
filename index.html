@@ -4722,11 +4722,13 @@ select.ie-in{width:auto}
     guide: null                          // test d'écoute guidé en cours
   };
   st.markers = []; st.markerSeq = 0; st.selSet = []; st.clipboard = null;
+  // Mes paroles (Cabine) : texte, temps des lignes (s, dans le morceau), réglages du prompteur
+  st.lyr = { text: '', times: [], fs: 26, mode: 'auto', speed: 1, cur: 0, anchor: null, preview: false, editing: true, cal: null, tc: null };
   st.exp = { sr: 44100, bits: 16, master: true }; st.preRoll = 2; st.recMode = null; st.mkOpen = false;
   var stripCache = null;
   var touchPts = {}, pinch = null;
   var pBuf = new WeakMap(); // buffer -> clé de sauvegarde ; wake = verrou d'écran pendant une prise
-  var wake = null;
+  var wake = null, wakeWait = false;
   var autoRt = {};   // état d'exécution de l'automation par piste (non sauvegardé)
   var cvCache = new Map(); // canevas de formes d'onde, clé = contenu
 
@@ -4843,7 +4845,12 @@ select.ie-in{width:auto}
   ICONS.dup = '<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M4 16V4a2 2 0 0 1 2-2h12"/><line x1="14.5" y1="12" x2="14.5" y2="17"/><line x1="12" y1="14.5" x2="17" y2="14.5"/>';
   ICONS.xf = '<path d="M3 5c6 0 6 14 18 14"/><path d="M3 19c6 0 6-14 18-14"/>';
   ICONS.flag = '<path d="M5 22V3"/><path d="M5 4h12l-2 4 2 4H5"/>';
-  ICONS.mklist = '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>';
+  ICONS.lyrics = '<path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>';
+  ICONS.eye = '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>';
+  ICONS.next = '<path d="M5 12h13"/><polyline points="12 6 18 12 12 18"/>';
+  ICONS.edit = '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>';
+  ICONS.minus = '<line x1="5" y1="12" x2="19" y2="12"/>';
+  ICONS.mklist ='<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/>';
   ICONS.auto = '<path d="M3 17c4-8 7 4 10-4s5-2 8-6"/>';
   ICONS.punch = '<path d="M4 6v12"/><circle cx="14" cy="12" r="6"/>';
   function icon(name) {
@@ -5370,7 +5377,8 @@ select.ie-in{width:auto}
           duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null };
       }),
       takes: st.takes.map(function (k) { return Object.assign({}, k); }),
-      markers: st.markers.map(cloneP)
+      markers: st.markers.map(cloneP),
+      lyr: { text: st.lyr.text, times: st.lyr.times.slice() }
     };
   }
   function serial(s) {
@@ -5384,6 +5392,7 @@ select.ie-in{width:auto}
     st.clips = s.clips.map(function (c) { return { id: c.id, trackId: c.trackId, name: c.name, buffer: c.buffer, start: c.start, offset: c.offset, duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null }; });
     st.takes = (s.takes || []).map(function (k) { return Object.assign({}, k); });
     st.markers = (s.markers || []).map(cloneP);
+    if (s.lyr) { st.lyr.text = s.lyr.text; st.lyr.times = s.lyr.times.slice(); st.lyr.cal = null; st.ui.pSig = null; }
     st.selSet = [];
     st.selClip = selId ? findClip(selId) : null;
     if (st.selTrack && !trackById(st.selTrack)) st.selTrack = null;
@@ -5492,6 +5501,7 @@ select.ie-in{width:auto}
     stopPreview(); kick();
     if (fixedC0 != null && rx.wantMedia && rx.media && rx.media.P === P) { rx.wantMedia = false; startMediaInstru(P, fixedC0); return; }
     rx.wantMedia = false;
+    st.lyr.anchor = { P: P, line: st.lyr.cur }; // défilement auto : repère de départ (Mes paroles)
     var lp = loopActive();
     if (lp && (P < L.a || P >= L.b)) P = L.a;
     var C0 = fixedC0 != null ? fixedC0 : c.currentTime + 0.03;
@@ -6001,6 +6011,7 @@ select.ie-in{width:auto}
     var c = getCtx(), a = mediaEl(), m = rx.media;
     st.graph = { c: c, sources: [], all: [], media: a, trackGain: {}, trackGate: {}, trackPan: {}, autoV: {}, autoP: {} };
     st.transport = { P0: P, C0: C0 };
+    st.lyr.anchor = { P: P, line: st.lyr.cur }; // défilement auto : repère de départ (Mes paroles)
     st.metroNext = nextBeatFrom(P);
     st.playing = true;
     startTimer();
@@ -7763,6 +7774,7 @@ select.ie-in{width:auto}
     '.as-prog-f{height:100%;width:0;background:var(--grad,linear-gradient(135deg,#22d3ee,#a855f7,#f43f5e));}',
     '.as-stopbig{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;width:96px;height:96px;margin:14px auto 0;border-radius:20px;border:none;background:var(--hot,#f43f5e);color:#fff;font:700 13px var(--font,system-ui,sans-serif);cursor:pointer;box-shadow:0 8px 24px rgba(244,63,94,.45);}',
     '.as-stopbig .as-ico{width:30px;height:30px;}',
+    '@media (max-width:820px){.as-stopbig{position:sticky;bottom:calc(14px + env(safe-area-inset-bottom,0px));z-index:20;width:100%;max-width:320px;height:64px;flex-direction:row;gap:10px;font-size:16px;border-radius:18px;box-shadow:0 10px 30px rgba(244,63,94,.55),0 0 0 4px rgba(12,10,20,.85);}}',
     '.as-takec{margin-top:16px;padding:12px;border-radius:12px;background:var(--panel2,#241e38);border:1px solid var(--border2,rgba(255,255,255,.16));}',
     '.as-takec-h{font-weight:700;font-size:16px;margin-bottom:10px;}',
     '.as-tgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px;}',
@@ -7804,6 +7816,44 @@ select.ie-in{width:auto}
     '.as-mlbl2{font:12px var(--mono,ui-monospace,monospace);color:var(--muted,#9d95b8);white-space:nowrap;}',
     '.as-exp{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px;}',
     '@media (max-width:820px){.as-mklist{margin:6px 8px 0;}.as-auto-hd{padding:6px 6px;}.as-mk-in{width:72px;}}',
+    // Mes paroles : saisie, résumé replié, prompteur (fond sombre, ligne courante surlignée)
+    '.as-lyr{max-width:100%;}',
+    '.as-lyr-ic{width:26px;height:26px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;flex:none;background:rgba(168,85,247,.25);color:#e9d5ff;}',
+    '.as-lyr-ic .as-ico{width:15px;height:15px;}',
+    '.as-lyr-n{margin-left:auto;font:600 11.5px var(--mono,ui-monospace,monospace);letter-spacing:0;text-transform:none;color:var(--muted,#9d95b8);white-space:nowrap;}',
+    '.as-lyr-ta{display:block;width:100%;min-height:150px;max-height:52vh;resize:vertical;padding:12px;margin:0;border-radius:10px;border:1px solid var(--border,rgba(255,255,255,.08));background:var(--bg2,#151223);color:var(--text,#efecf8);font:16px/1.45 var(--font,system-ui,sans-serif);color-scheme:dark;-webkit-appearance:none;appearance:none;}',
+    '.as-lyr-ta::placeholder{color:var(--muted,#9d95b8);opacity:.85;}',
+    '.as-lyr-ta:focus{outline:none;border-color:var(--accent2,#a855f7);box-shadow:0 0 0 2px rgba(168,85,247,.25);}',
+    '.as-lyr-sum{display:flex;align-items:center;gap:10px;min-height:48px;}',
+    '.as-lyr-st{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;color:var(--text,#efecf8);}',
+    '.as-lyr-cal{width:100%;}',
+    '.as-lyr-tl{margin-top:10px;font-size:13px;color:var(--muted,#9d95b8);}',
+    '.as-lyr-tl summary{min-height:44px;display:flex;align-items:center;cursor:pointer;}',
+    '.as-lyr-tl-list{max-height:260px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding-top:4px;}',
+    '.as-tl-row{display:flex;align-items:center;gap:8px;min-height:44px;}',
+    '.as-tl-t{flex:none;width:58px;font:12px var(--mono,ui-monospace,monospace);color:var(--text,#efecf8);font-variant-numeric:tabular-nums;}',
+    '.as-tl-x{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted,#9d95b8);}',
+    '.as-tl-row .as-cbtn{min-width:52px;padding:0 8px;}',
+    '.as-lp{display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:14px;background:rgba(7,6,13,.72);border:1px solid var(--border2,rgba(255,255,255,.16));width:100%;box-sizing:border-box;}',
+    '.as-lp[hidden]{display:none !important;}',
+    '.as-lp-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}',
+    '.as-lp-sp{flex:1;}',
+    '.as-lpb{display:inline-flex;align-items:center;justify-content:center;min-height:44px;min-width:44px;padding:0 12px;border-radius:10px;background:var(--panel2,#241e38);border:1px solid var(--border,rgba(255,255,255,.08));color:var(--text,#efecf8);font:600 13px/1 var(--font,system-ui,sans-serif);cursor:pointer;user-select:none;-webkit-user-select:none;transition:background .15s,border-color .15s,box-shadow .15s,transform .12s;}',
+    '.as-lpb:active{transform:scale(.97);}',
+    '.as-lpb:disabled{opacity:.4;cursor:default;}',
+    '.as-lpb.on{background:linear-gradient(135deg,rgba(168,85,247,.38),rgba(168,85,247,.16));border-color:var(--accent2,#a855f7);box-shadow:0 0 0 1px var(--accent2,#a855f7),0 0 16px rgba(168,85,247,.35);}',
+    '.as-pmt{position:relative;height:min(40vh,330px);min-height:200px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;touch-action:pan-y;border-radius:12px;background:#07060d;padding:0 14px;box-sizing:border-box;font-size:var(--pfs,26px);}',
+    '.as-pmt-in{position:relative;}',
+    '.as-pl{position:relative;padding:.3em .35em .3em 16px;line-height:1.3;color:#d6d0ea;font-weight:500;word-wrap:break-word;overflow-wrap:anywhere;border-radius:8px;cursor:pointer;transition:color .2s,opacity .2s,background .2s;}',
+    '.as-pl::before{content:"";position:absolute;left:4px;top:.22em;bottom:.22em;width:4px;border-radius:2px;background:transparent;transition:background .2s,box-shadow .2s;}',
+    '.as-pl.past{opacity:.32;}',
+    '.as-pl.on{color:#fff;font-weight:800;background:linear-gradient(90deg,rgba(168,85,247,.22),rgba(168,85,247,0) 85%);}',
+    '.as-pl.on::before{background:var(--accent2,#a855f7);box-shadow:0 0 12px rgba(168,85,247,.85);}',
+    '.as-pl-blank{height:.8em;cursor:default;}',
+    '.as-pl-end{pointer-events:none;}',
+    '.as-lp-cal{display:flex;flex-direction:column;gap:8px;}',
+    '.as-lp-next{font-size:14px;line-height:1.35;color:var(--text,#efecf8);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.as-lp-next b{color:var(--muted,#9d95b8);font-weight:600;margin-right:6px;}',
     '@media (max-width:820px){.as-booth{padding:8px 8px 26px;}.as-card{padding:12px;}.as-cd{font-size:84px;}.as-chrono{font-size:48px;}.as-tlrow{padding-left:10px;}}'
   ].join('\n');
 
@@ -8493,6 +8543,7 @@ select.ie-in{width:auto}
   function boothRec(pos) {
     if (st.recording) { stopRecording(); return; }
     if (st.recPending) return;
+    if (st.lyr.cal) lyrCalEnd(false); // un calage en cours s'arrête avant la prise
     var b = st.booth;
     st.mic.countIn = b.count ? 4 : 0;
     if (st.playing) pause();
@@ -8558,6 +8609,347 @@ select.ie-in{width:auto}
     row.r.disabled = !t;
     if (document.activeElement !== row.r) row.r.value = pctOf(t);
     row.v.textContent = pctOf(t) + ' %';
+  }
+
+  // ---------- Mes paroles : texte, prompteur (Manuel / Auto / Synchronisé), calage sur l’instru ----------
+  var LYR_KEY = 'sf_lyrics_prefs', LYR_UNDO = 'Effacer les paroles';
+  var LYR_SPEEDS = [0.5, 1, 1.5, 2];
+  function loadLyrPrefs() {
+    try { var o = JSON.parse(window.localStorage.getItem(LYR_KEY) || 'null'); if (o) lyrApplyPrefs(o); }
+    catch (e) { /* stockage indisponible ou valeur corrompue */ }
+  }
+  function lyrApplyPrefs(o) {
+    if (o.fs != null && isFinite(+o.fs)) st.lyr.fs = clamp(Math.round(+o.fs), 18, 40);
+    if (o.mode === 'manual' || o.mode === 'auto' || o.mode === 'sync') st.lyr.mode = o.mode;
+    if (o.speed != null && isFinite(+o.speed)) st.lyr.speed = clamp(+o.speed, 0.5, 2);
+  }
+  function saveLyrPrefs() {
+    try { window.localStorage.setItem(LYR_KEY, JSON.stringify({ fs: st.lyr.fs, mode: st.lyr.mode, speed: st.lyr.speed })); }
+    catch (e) { /* stockage indisponible */ }
+  }
+  function lyrLines() { return st.lyr.text ? st.lyr.text.split('\n') : []; }
+  function lyrHas() { return !!st.lyr.text.trim(); }
+  function lyrCount() { var n = 0; lyrLines().forEach(function (l) { if (l.trim()) n++; }); return n; }
+  function lyrCountText() { var n = lyrCount(); return n ? n + ' ligne' + (n > 1 ? 's' : '') : 'Vide'; }
+  function lyrNonBlank() { var r = []; lyrLines().forEach(function (l, i) { if (l.trim()) r.push(i); }); return r; }
+  // Nettoyage léger : fins de ligne normalisées, espaces de fin retirés, lignes vides gardées
+  function lyrClean(s) {
+    return String(s || '').replace(/\r\n?/g, '\n').split('\n')
+      .map(function (l) { return l.replace(/[ \t ]+$/, ''); }).join('\n')
+      .replace(/^\n+/, '').replace(/\n+$/, '');
+  }
+  // Les temps suivent les lignes : si leur nombre change, on les écarte
+  function lyrCheckTimes() {
+    if (st.lyr.times.length && st.lyr.times.length !== lyrLines().length) st.lyr.times = [];
+  }
+  function lyrMsg(txt, err) {
+    var m = st.ui.lyrMsg;
+    if (!m) return;
+    m.textContent = txt || '';
+    m.className = 'as-bmsg' + (err ? ' as-err' : '');
+  }
+  // Débit du défilement auto, en lignes par seconde : une ligne par mesure (4 temps) à la vitesse réglée
+  function lyrRate() { return st.lyr.speed * st.bpm / 240; }
+  // Ligne à afficher en surbrillance : jamais une ligne vide (on prend la suivante)
+  function lyrHL(i) {
+    var L = lyrLines(), n = L.length;
+    if (!n) return 0;
+    i = clamp(i, 0, n - 1);
+    while (i < n - 1 && !L[i].trim()) i++;
+    return i;
+  }
+  // Index de la ligne calée la plus récente à la position pos (-1 si aucune ligne calée)
+  function syncIdx(pos) {
+    var t = st.lyr.times, L = lyrLines(), best = -1, bt = -Infinity, i;
+    for (i = 0; i < L.length; i++) {
+      var v = t[i];
+      if (v != null && L[i].trim() && v <= pos + 1e-6 && v >= bt) { bt = v; best = i; }
+    }
+    return best;
+  }
+  function lyrBuildLines() {
+    var u = st.ui, L = lyrLines();
+    u.pIn.innerHTML = ''; u.pLines = [];
+    L.forEach(function (txt, i) {
+      var blank = !txt.trim();
+      var d = el('div', blank ? 'as-pl as-pl-blank' : 'as-pl', blank ? '' : txt);
+      if (!blank) d.addEventListener('click', function () { lyrPick(i); });
+      u.pIn.appendChild(d); u.pLines.push(d);
+    });
+    u.pIn.appendChild(u.pEnd);
+    u.pSig = st.lyr.text;
+  }
+  // Ligne courante : surlignage des classes (on / passée / à venir) et défilement au tiers supérieur
+  function applyHighlight(smooth) {
+    var u = st.ui;
+    if (!u.pLines || !u.pLines.length) return;
+    var hl = lyrHL(st.lyr.cur);
+    u.pLines.forEach(function (d, i) {
+      d.classList.toggle('on', i === hl);
+      d.classList.toggle('past', i < hl);
+    });
+    lyrScroll(hl, smooth);
+  }
+  function lyrScroll(i, smooth) {
+    var u = st.ui, vp = u.pVp, d = u.pLines && u.pLines[i];
+    if (!vp || !d || !vp.clientHeight) return;
+    var top = Math.max(0, d.offsetTop + d.offsetHeight / 2 - vp.clientHeight / 3);
+    if (smooth && vp.scrollTo) vp.scrollTo({ top: top, behavior: 'smooth' });
+    else vp.scrollTop = top;
+  }
+  function lyrLayout() {
+    var u = st.ui;
+    if (u.pVp && u.pEnd && u.pVp.clientHeight) u.pEnd.style.height = Math.round(u.pVp.clientHeight * 2 / 3) + 'px';
+  }
+  // Suivi pendant la lecture ou la prise (appelé à chaque image de la Cabine)
+  function lyrTick() {
+    var L = st.lyr, u = st.ui;
+    if (!u.pLines || L.cal || !(st.playing || st.recording) || !lyrHas()) return;
+    var n = u.pLines.length, pos = currentPos(), idx = null;
+    if (L.mode === 'auto') {
+      if (!st.playing || !L.anchor) return;
+      idx = clamp(Math.floor(L.anchor.line + Math.max(0, pos - L.anchor.P) * lyrRate() + 1e-6), 0, n - 1);
+    } else if (L.mode === 'sync') {
+      idx = syncIdx(pos);
+      if (idx < 0) return;
+    } else return;
+    if (idx !== L.cur) { L.cur = idx; applyHighlight(true); }
+  }
+  // Tap sur une ligne : elle devient la ligne courante (et le repère du défilement auto)
+  function lyrPick(i) {
+    if (st.lyr.cal || !lyrLines()[i] || !lyrLines()[i].trim()) return;
+    st.lyr.cur = i;
+    st.lyr.anchor = { P: currentPos(), line: i };
+    applyHighlight(true);
+  }
+  function lyrSetMode(m) {
+    var L = st.lyr;
+    if (m === 'sync' && !L.times.some(function (v) { return v != null; })) {
+      lyrMsg('Cale d’abord les lignes sur l’instru (bouton « Caler les lignes »).', true);
+      renderBooth();
+      return;
+    }
+    L.mode = m;
+    L.anchor = { P: currentPos(), line: L.cur };
+    if (m === 'sync') { var k = syncIdx(currentPos()); if (k >= 0) L.cur = k; }
+    saveLyrPrefs(); markDirty();
+    applyHighlight(true);
+    renderBooth();
+  }
+  function lyrSetSpeed(v) {
+    st.lyr.speed = v;
+    st.lyr.anchor = { P: currentPos(), line: st.lyr.cur };
+    saveLyrPrefs(); markDirty(); renderBooth();
+  }
+  function lyrFont(d) {
+    var L = st.lyr;
+    L.fs = clamp(L.fs + d, 18, 40);
+    if (st.ui.pVp) st.ui.pVp.style.setProperty('--pfs', L.fs + 'px');
+    saveLyrPrefs(); markDirty();
+    lyrLayout(); applyHighlight(false);
+    renderBooth();
+  }
+  function lyrBlur() {
+    var u = st.ui, L = st.lyr;
+    L.text = lyrClean(u.lyrTa.value);
+    lyrCheckTimes();
+    pushHistory('Modifier les paroles');
+    markDirty();
+    // Repli différé : le clic sur un bouton voisin doit encore atteindre sa cible
+    clearTimeout(L.tc);
+    L.tc = setTimeout(function () {
+      L.tc = null;
+      if (lyrHas() && document.activeElement !== u.lyrTa) { L.editing = false; renderBooth(); }
+      else renderBooth();
+    }, 350);
+    renderBooth();
+  }
+  function lyrPaste() {
+    var u = st.ui, ta = u.lyrTa;
+    function fail() { lyrMsg('Appuie longuement dans la zone puis Coller.', true); ta.focus(); }
+    var rp = null;
+    try { rp = navigator.clipboard && navigator.clipboard.readText ? navigator.clipboard.readText() : null; }
+    catch (e) { rp = null; }
+    if (!rp || !rp.then) { fail(); return; }
+    rp.then(function (txt) {
+      txt = String(txt || '');
+      if (!txt.trim()) { lyrMsg('Le presse-papiers est vide. Copie d’abord tes paroles dans Notes.', true); return; }
+      var base = ta.value, focused = document.activeElement === ta;
+      var s = focused ? ta.selectionStart : base.length, e = focused ? ta.selectionEnd : base.length;
+      st.lyr.text = lyrClean(base.slice(0, s) + txt + base.slice(e));
+      lyrCheckTimes();
+      st.lyr.editing = false;
+      st.lyr.cur = 0;
+      var n = lyrCount();
+      lyrMsg(n + ' ligne' + (n > 1 ? 's' : '') + ' collée' + (n > 1 ? 's' : '') + '. Relis, modifie si besoin.');
+      pushHistory('Coller les paroles');
+      markDirty();
+      renderBooth();
+    }, fail);
+  }
+  function lyrClear() {
+    if (st.lyr.cal) lyrCalEnd(false);
+    st.lyr.text = ''; st.lyr.times = []; st.lyr.cur = 0; st.lyr.anchor = null;
+    st.lyr.preview = false; st.lyr.editing = true;
+    pushHistory(LYR_UNDO);
+    markDirty();
+    renderBooth();
+    lyrMsg('Paroles effacées. « Annuler l’effacement » les retrouve.');
+  }
+  function lyrPreview() {
+    if (!lyrHas()) { lyrMsg('Colle d’abord tes paroles dans la zone ci-dessus.', true); return; }
+    st.lyr.preview = !st.lyr.preview;
+    renderBooth();
+  }
+  // Calage : lecture depuis 0, un tap par ligne non vide (temps = position dans le morceau)
+  function lyrCalStart() {
+    if (st.recording || st.recPending) return;
+    var nb = lyrNonBlank();
+    if (!nb.length) { lyrMsg('Ajoute d’abord tes paroles dans la zone ci-dessus.', true); return; }
+    stopPreview();
+    if (st.playing) pause();
+    st.lyr.times = lyrLines().map(function () { return null; });
+    st.lyr.cal = { idx: nb, k: 0 };
+    st.lyr.cur = nb[0];
+    st.playhead = 0;
+    lyrMsg('Touche « Ligne suivante » au moment où chaque ligne commence.');
+    play();
+    applyHighlight(true);
+    renderBooth();
+  }
+  function lyrCalTap() {
+    var c = st.lyr.cal;
+    if (!c || c.k >= c.idx.length) return;
+    st.lyr.times[c.idx[c.k]] = Math.round(currentPos() * 100) / 100;
+    st.lyr.cur = c.idx[c.k];
+    c.k++;
+    lyrMsg(c.k >= c.idx.length ? 'Toutes les lignes sont calées : touche « Terminer ».' : '');
+    markDirty();
+    applyHighlight(true);
+    renderBooth();
+  }
+  function lyrCalRestart() {
+    var c = st.lyr.cal;
+    if (!c) return;
+    st.lyr.times = lyrLines().map(function () { return null; });
+    c.k = 0; st.lyr.cur = c.idx[0];
+    if (st.playing) pause();
+    st.playhead = 0;
+    play();
+    applyHighlight(true);
+    renderBooth();
+  }
+  function lyrCalEnd(finish) {
+    var L = st.lyr;
+    if (!L.cal) return;
+    L.cal = null;
+    if (st.playing) pause();
+    if (finish) {
+      var any = L.times.some(function (v) { return v != null; });
+      if (any) { L.mode = 'sync'; lyrMsg('Lignes calées : mode Synchronisé activé.'); st.ui.lyrTimes.open = true; }
+      else lyrMsg('Aucune ligne calée.', true);
+      L.anchor = { P: currentPos(), line: L.cur };
+      saveLyrPrefs();
+      pushHistory('Caler les paroles');
+    }
+    markDirty();
+    applyHighlight(false);
+    renderBooth();
+  }
+  // Réglage fin : ± 0,1 s sur une ligne calée
+  function lyrNudge(i, d) {
+    var t = st.lyr.times[i];
+    if (t == null) return;
+    st.lyr.times[i] = Math.max(0, Math.round((t + d) * 10) / 10);
+    if (st.lyr.mode === 'sync') { var k = syncIdx(currentPos()); if (k >= 0) st.lyr.cur = k; }
+    pushHistory('Temps des paroles');
+    markDirty();
+    applyHighlight(false);
+    renderBooth();
+  }
+  // Écran allumé pendant l'aperçu et le prompteur en lecture (la prise gère son propre verrou)
+  function lyrWake(want) {
+    if (st.recording) return;
+    if (want && !wake && !wakeWait) {
+      wakeWait = true;
+      try {
+        navigator.wakeLock.request('screen').then(function (s) { wake = s; wakeWait = false; }, function () { wakeWait = false; });
+      } catch (e) { wakeWait = false; }
+    } else if (!want && wake) {
+      wakeOff();
+    }
+  }
+  function renderLyrics() {
+    var u = st.ui, L = st.lyr;
+    if (!u.lyrCard) return;
+    var has = lyrHas(), edit = L.editing || !has, lines = lyrLines();
+    u.lyrEdit.hidden = !edit;
+    u.lyrSum.hidden = edit;
+    u.lyrCount.textContent = lyrCountText();
+    if (document.activeElement !== u.lyrTa && u.lyrTa.value !== L.text) u.lyrTa.value = L.text;
+    if (!edit) {
+      var first = '';
+      lines.some(function (l) { if (l.trim()) { first = l.trim(); return true; } return false; });
+      u.lyrSt.textContent = lyrCount() + ' ligne' + (lyrCount() > 1 ? 's' : '') + ' · ' + first.slice(0, 48) + '…';
+    }
+    u.lyrCal.hidden = !has || !!L.cal;
+    [u.lyrPrev, u.lyrSumPrev].forEach(function (b) {
+      b.classList.toggle('on', L.preview);
+      b.setAttribute('aria-pressed', L.preview ? 'true' : 'false');
+    });
+    var top = st.undo[st.undo.length - 1];
+    u.lyrUndo.hidden = !(top && top.label === LYR_UNDO);
+    var sig = L.text + '|' + L.times.join(',');
+    if (u.tlSigL !== sig) {
+      u.tlSigL = sig;
+      u.lyrTl.innerHTML = '';
+      lines.forEach(function (txt, i) {
+        var t = L.times[i];
+        if (t == null || !txt.trim()) return;
+        var row = el('div', 'as-tl-row');
+        row.appendChild(el('span', 'as-tl-t', fmtTime(t, true).slice(3, 9)));
+        row.appendChild(el('span', 'as-tl-x', txt.trim()));
+        cbtn(row, 'minus', '−0,1', '', function () { lyrNudge(i, -0.1); });
+        cbtn(row, 'plus', '+0,1', '', function () { lyrNudge(i, 0.1); });
+        u.lyrTl.appendChild(row);
+      });
+    }
+    u.lyrTimes.hidden = !u.lyrTl.childNodes.length;
+  }
+  // Panneau prompteur : placé dans la carte ON AIR pendant la prise, sinon dans l'étape 3 (écoute, aperçu)
+  function renderPanel(rec, has) {
+    var u = st.ui, L = st.lyr;
+    var show = (has && (rec || st.playing)) || (L.preview && has);
+    var host = rec ? u.recLive : u.recIdle, ref = rec ? u.stopBtn : u.recWrap;
+    var moved = u.lp.parentNode !== host || u.lp.nextSibling !== ref;
+    if (moved) host.insertBefore(u.lp, ref);
+    var was = u.lp.hidden;
+    u.lp.hidden = !show;
+    if (!show) return;
+    if (u.pSig !== L.text || !u.pLines) lyrBuildLines();
+    Object.keys(u.lpModes).forEach(function (k) {
+      var on = L.mode === k;
+      u.lpModes[k].classList.toggle('on', on);
+      u.lpModes[k].setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    Object.keys(u.lpSpeeds).forEach(function (k) {
+      var on = +k === L.speed;
+      u.lpSpeeds[k].hidden = L.mode !== 'auto';
+      u.lpSpeeds[k].classList.toggle('on', on);
+      u.lpSpeeds[k].setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    u.lpDown.disabled = L.fs <= 18; u.lpUp.disabled = L.fs >= 40;
+    u.pVp.style.setProperty('--pfs', L.fs + 'px');
+    u.lpCal.hidden = !L.cal;
+    if (L.cal) {
+      var nx = L.cal.idx[L.cal.k];
+      u.calNext.innerHTML = '';
+      if (nx == null) u.calNext.textContent = 'Toutes les lignes sont calées.';
+      else { u.calNext.appendChild(el('b', null, 'Prochaine')); u.calNext.appendChild(document.createTextNode(lyrLines()[nx].trim())); }
+      u.calBtn.disabled = nx == null;
+    }
+    lyrLayout();
+    if (moved || was) applyHighlight(false);
   }
 
   function buildBooth(p) {
@@ -8665,6 +9057,102 @@ select.ie-in{width:auto}
     fine.type = 'button';
     fine.addEventListener('click', function () { toggleSheet(true); });
     c2.appendChild(fine);
+
+    // Mes paroles (entre les étapes 2 et 3) : saisie, nettoyage au collage, résumé replié
+    var lc = el('section', 'as-card as-lyr');
+    var lh = el('div', 'as-card-h');
+    var lic = el('span', 'as-lyr-ic'); lic.innerHTML = icon('lyrics');
+    lh.appendChild(lic);
+    lh.appendChild(el('span', null, 'Mes paroles'));
+    u.lyrCount = el('span', 'as-lyr-n', '');
+    lh.appendChild(u.lyrCount);
+    lc.appendChild(lh);
+    u.lyrEdit = el('div', 'as-stack');
+    u.lyrTa = el('textarea', 'as-lyr-ta');
+    u.lyrTa.placeholder = 'Colle ici tes paroles depuis Notes (appui long › Coller)';
+    u.lyrTa.setAttribute('aria-label', 'Paroles');
+    u.lyrTa.setAttribute('autocorrect', 'off');
+    u.lyrTa.spellcheck = false;
+    u.lyrTa.rows = 8;
+    u.lyrTa.addEventListener('input', function () {
+      st.lyr.text = u.lyrTa.value; markDirty();
+      u.lyrCount.textContent = lyrCountText();
+    });
+    u.lyrTa.addEventListener('focus', function () { clearTimeout(st.lyr.tc); });
+    u.lyrTa.addEventListener('blur', lyrBlur);
+    u.lyrEdit.appendChild(u.lyrTa);
+    var lr = el('div', 'as-row2');
+    cbtn(lr, 'paste', 'Coller', 'lg', lyrPaste);
+    cbtn(lr, 'trash', 'Effacer', 'danger', lyrClear);
+    u.lyrPrev = cbtn(lr, 'eye', 'Aperçu prompteur', '', lyrPreview);
+    u.lyrUndo = cbtn(lr, 'undo', 'Annuler l’effacement', 'keep', function () { undo(); });
+    u.lyrUndo.hidden = true;
+    u.lyrEdit.appendChild(lr);
+    u.lyrMsg = el('div', 'as-bmsg', '');
+    u.lyrMsg.setAttribute('role', 'status'); u.lyrMsg.setAttribute('aria-live', 'polite');
+    u.lyrEdit.appendChild(u.lyrMsg);
+    lc.appendChild(u.lyrEdit);
+    u.lyrSum = el('div', 'as-lyr-sum'); u.lyrSum.hidden = true;
+    u.lyrSt = el('span', 'as-lyr-st', '');
+    u.lyrSum.appendChild(u.lyrSt);
+    cbtn(u.lyrSum, 'edit', 'Modifier', 'sm', function () {
+      st.lyr.editing = true; renderBooth();
+      u.lyrTa.focus();
+    });
+    u.lyrSumPrev = cbtn(u.lyrSum, 'eye', 'Aperçu', 'sm', lyrPreview);
+    lc.appendChild(u.lyrSum);
+    u.lyrCal = cbtn(null, 'clock', 'Caler les lignes sur l’instru', 'lg lyr-cal', lyrCalStart);
+    u.lyrCal.classList.add('as-lyr-cal');
+    lc.appendChild(u.lyrCal);
+    u.lyrTimes = el('details', 'as-lyr-tl'); u.lyrTimes.hidden = true;
+    u.lyrTimes.appendChild(el('summary', null, 'Temps des lignes (réglage fin ± 0,1 s)'));
+    u.lyrTl = el('div', 'as-lyr-tl-list');
+    u.lyrTimes.appendChild(u.lyrTl);
+    lc.appendChild(u.lyrTimes);
+    box.appendChild(lc);
+    u.lyrCard = lc;
+
+    // Prompteur : panneau unique, déplacé dans la carte d'enregistrement pendant la prise
+    u.lp = el('div', 'as-lp'); u.lp.hidden = true;
+    var lpBar = el('div', 'as-lp-row');
+    u.lpModes = {};
+    [['manual', 'Manuel'], ['auto', 'Auto'], ['sync', 'Synchronisé']].forEach(function (d) {
+      var b = el('button', 'as-lpb', d[1]);
+      b.type = 'button';
+      b.setAttribute('aria-pressed', 'false');
+      b.addEventListener('click', function (e) { e.stopPropagation(); lyrSetMode(d[0]); });
+      u.lpModes[d[0]] = b; lpBar.appendChild(b);
+    });
+    u.lpRow2 = el('div', 'as-lp-row');
+    u.lpSpeeds = {};
+    [[0.5, '0,5×'], [1, '1×'], [1.5, '1,5×'], [2, '2×']].forEach(function (d) {
+      var b = el('button', 'as-lpb', d[1]);
+      b.type = 'button';
+      b.setAttribute('aria-pressed', 'false');
+      b.addEventListener('click', function (e) { e.stopPropagation(); lyrSetSpeed(d[0]); });
+      u.lpSpeeds[d[0]] = b; u.lpRow2.appendChild(b);
+    });
+    u.lpRow2.appendChild(el('span', 'as-lp-sp'));
+    u.lpDown = el('button', 'as-lpb', 'A−');
+    u.lpDown.type = 'button'; u.lpDown.setAttribute('aria-label', 'Réduire la taille du texte');
+    u.lpDown.addEventListener('click', function (e) { e.stopPropagation(); lyrFont(-2); });
+    u.lpUp = el('button', 'as-lpb', 'A+');
+    u.lpUp.type = 'button'; u.lpUp.setAttribute('aria-label', 'Agrandir la taille du texte');
+    u.lpUp.addEventListener('click', function (e) { e.stopPropagation(); lyrFont(2); });
+    u.lpRow2.appendChild(u.lpDown); u.lpRow2.appendChild(u.lpUp);
+    u.pVp = el('div', 'as-pmt');
+    u.pVp.addEventListener('click', function () { if (st.lyr.cal) lyrCalTap(); });
+    u.pIn = el('div', 'as-pmt-in');
+    u.pEnd = el('div', 'as-pl-end');
+    u.pVp.appendChild(u.pIn);
+    u.lpCal = el('div', 'as-lp-cal'); u.lpCal.hidden = true;
+    u.calNext = el('div', 'as-lp-next', '');
+    u.calBtn = cbtn(u.lpCal, 'next', 'Ligne suivante', 'xl', lyrCalTap);
+    var calRow = el('div', 'as-row2');
+    cbtn(calRow, 'retry', 'Recommencer', '', lyrCalRestart);
+    cbtn(calRow, 'check', 'Terminer', 'keep', function () { lyrCalEnd(true); });
+    u.lpCal.appendChild(u.calNext); u.lpCal.appendChild(u.calBtn); u.lpCal.appendChild(calRow);
+    u.lp.appendChild(lpBar); u.lp.appendChild(u.lpRow2); u.lp.appendChild(u.pVp); u.lp.appendChild(u.lpCal);
 
     // 3. Enregistre
     var c3 = card(box, 3, 'Enregistre');
@@ -8876,6 +9364,10 @@ select.ie-in{width:auto}
     u.startZero.classList.toggle('on', b.start === 'zero');
     u.startHere.classList.toggle('on', b.start !== 'zero');
     if (document.activeElement !== u.bpm) u.bpm.value = st.bpm;
+    var hasLyr = lyrHas();
+    renderLyrics();
+    renderPanel(rec, hasLyr);
+    lyrWake(rec || st.lyr.preview || (st.playing && hasLyr));
     renderTakeCard();
     renderTakeList(voice);
     var pr = presetOf(voice);
@@ -8927,6 +9419,7 @@ select.ie-in{width:auto}
     if (!u.boothWin) return;
     var c = st.ctx, now = c ? c.currentTime : 0;
     u.bTime.textContent = fmtTime(c && st.playing ? currentPos() : st.playhead, false);
+    lyrTick();
     var lv = 0;
     if (rx.stream && rx.an && rx.buf) {
       rx.an.getFloatTimeDomainData(rx.buf);
@@ -9011,7 +9504,8 @@ select.ie-in{width:auto}
       markers: st.markers, markerSeq: st.markerSeq, preRoll: st.preRoll,
       tracks: cloneP(st.tracks), clips: clips, takes: takes,
       mic: { countIn: st.mic.countIn, instru: st.mic.instru },
-      booth: { count: st.booth.count, start: st.booth.start, lastId: st.booth.lastId, acap: st.booth.acap }
+      booth: { count: st.booth.count, start: st.booth.start, lastId: st.booth.lastId, acap: st.booth.acap },
+      lyrics: { text: st.lyr.text, times: st.lyr.times.slice(), fs: st.lyr.fs, mode: st.lyr.mode, speed: st.lyr.speed }
     };
   }
   function markDirty() {
@@ -9069,7 +9563,7 @@ select.ie-in{width:auto}
     var rq = null;
     idb(['session'], 'readonly', function (tx) { rq = tx.objectStore('session').get('current'); }).then(function () {
       var rec = rq && rq.result;
-      if (rec && rec.state && ((rec.state.tracks || []).length || (rec.state.clips || []).length)) {
+      if (rec && rec.state && ((rec.state.tracks || []).length || (rec.state.clips || []).length || (rec.state.lyrics && rec.state.lyrics.text))) {
         st.sess.found = rec; st.sess.pending = true;
         showSessBanner('ask');
         setSaved('Choisis une session pour activer la sauvegarde');
@@ -9135,6 +9629,10 @@ select.ie-in{width:auto}
       st.armedId = null; st.selClip = null; st.selTrack = null; st.selRange = null; st.spot = null; st.insSel = null;
       st.mic.countIn = S.mic.countIn; st.mic.instru = S.mic.instru;
       st.booth.count = S.booth.count; st.booth.start = S.booth.start; st.booth.acap = S.booth.acap;
+      var LY = S.lyrics || {};
+      st.lyr.text = String(LY.text || ''); st.lyr.times = Array.isArray(LY.times) ? LY.times.slice() : [];
+      lyrApplyPrefs(LY); saveLyrPrefs();
+      st.lyr.cal = null; st.lyr.cur = 0; st.lyr.anchor = null; st.lyr.editing = !st.lyr.text.trim(); st.ui.pSig = null;
       st.booth.lastId = takeById(S.booth.lastId) ? S.booth.lastId : null;
       st.sess.seq = Math.max(st.sess.seq, maxSeq(keys));
       st.sess.bufs = Object.keys(map);
@@ -9164,6 +9662,7 @@ select.ie-in{width:auto}
       st.tracks = []; st.clips = []; st.takes = []; st.markers = []; st.markerSeq = 0; st.selSet = []; autoRt = {};
       st.selClip = null; st.selTrack = null; st.selRange = null; st.armedId = null;
       st.booth.lastId = null;
+      st.lyr.text = ''; st.lyr.times = []; st.lyr.cur = 0; st.lyr.cal = null; st.lyr.anchor = null; st.lyr.editing = true; st.ui.pSig = null;
       st.undo = []; st.redo = [];
       st.last = snapshot(); st.lastSer = serial(st.last);
       hideSess();
@@ -9737,6 +10236,7 @@ select.ie-in{width:auto}
     st.last = snapshot(); st.lastSer = serial(st.last);
     st.mic.latency = loadLatency();
     st.booth.hp = loadHP();
+    loadLyrPrefs();
     showTab(st.narrow ? 'booth' : 'edit');
     updateHistBtns();
     document.addEventListener('visibilitychange', onHide);
@@ -9782,6 +10282,8 @@ select.ie-in{width:auto}
         calT0: rx.cal ? rx.cal.t0 : null,
         calib: rx.calVal,
         view: st.tab,
+        pos: currentPos(),
+        lyrTimes: st.lyr.times.slice(),
         frameOn: st.frameOn,
         headset: st.booth.hp,
         takes: st.takes.map(function (k) { return { id: k.id, trackId: k.trackId, num: k.num, dur: k.buffer.duration, active: isActive(k) }; }),
