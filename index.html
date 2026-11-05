@@ -8057,6 +8057,9 @@ select.ie-in{width:auto}
     tb.appendChild(el('div', 'as-sep'));
     ibtn(tb, 'bars', 'Normaliser', 'Régler le gain du clip pour que son pic atteigne −1 dBFS', normalizeSelected);
     st.ui.stripBtn = ibtn(tb, 'strip', 'Strip Silence', 'Ouvrir le panneau Strip Silence sur le clip sélectionné (Ctrl+U)', function () { toggleStrip(); });
+    ibtn(tb, 'metro', 'Recaler', 'Recaler la voix du clip sélectionné sur le temps de l’instru (aimant)', function () {
+      if (st.selClip) openSync(syncSrcClip(st.selClip)); else setStatus('Sélectionne un clip à recaler.', true);
+    });
     var spot = el('span', 'as-spot');
     spot.appendChild(lbl('Début (s)'));
     var spotIn = inp('number', 'as-num');
@@ -9230,6 +9233,7 @@ select.ie-in{width:auto}
     u.tkRedo = cbtn(tg, 'retry', 'Refaire', '', function () { var tk = takeById(st.booth.lastId); if (tk) boothRedo(tk); });
     u.tkDel = cbtn(tg, 'trash', 'Supprimer', 'danger', function () { var tk = takeById(st.booth.lastId); if (tk) boothDelete(tk); });
     u.takeCard.appendChild(tg);
+    cbtn(u.takeCard, 'metro', 'Recaler sur le temps', 'xl', function () { var tk = takeById(st.booth.lastId); if (tk) openSync(syncSrcTake(tk)); });
     var cal = el('div', 'as-cal');
     cal.appendChild(el('span', 'as-mlbl', 'Calage voix'));
     u.calR = inp('range', 'as-br');
@@ -9330,6 +9334,7 @@ select.ie-in{width:auto}
       info.appendChild(el('div', 'as-tlm', fmtDur(tk.buffer.duration) + ' · ' + clockOf(tk.at)));
       row.appendChild(info);
       cbtn(row, st.booth.prevId === tk.id ? 'pause' : 'play', 'Écouter', 'sm', function () { previewTake(tk); });
+      cbtn(row, 'metro', 'Recaler', 'sm', function () { openSync(syncSrcTake(tk)); });
       if (on) row.appendChild(el('span', 'as-pill ok', 'Active'));
       else cbtn(row, 'check', 'Utiliser', 'sm', function () { useTakeUI(tk); });
       u.tl.appendChild(row);
@@ -10217,7 +10222,7 @@ select.ie-in{width:auto}
     st.root = rootEl;
     rootEl.innerHTML = '';
     var style = el('style');
-    style.textContent = CSS;
+    style.textContent = CSS + '\n' + CSS_SYNC;
     rootEl.appendChild(style);
     var wrap = el('div', 'as-root');
     rootEl.appendChild(wrap);
@@ -10235,6 +10240,7 @@ select.ie-in{width:auto}
     buildEditWin(wrap);
     buildMixWin(wrap);
     buildSheet(wrap);
+    buildSync(wrap);
     bindKeys();
     bindUnlock();
     bindDevices();
@@ -10255,9 +10261,785 @@ select.ie-in{width:auto}
     checkSession();
   }
 
+  // ---------- Recalage voix / temps (« Recaler sur le temps ») : moteur ----------
+  // syncEngine() est autonome (aucune variable externe) : il tourne dans un Worker créé à partir d'un Blob,
+  // ou sur le fil principal si le Worker est indisponible.
+  function syncEngine() {
+    var TAU = 2 * Math.PI, NF = 1024, HOP = 256;
+    function posmod(a, b) { var r = a % b; return r < 0 ? r + b : r; }
+    function clampN(v, a, b) { return v < a ? a : (v > b ? b : v); }
+    // FFT radix-2 sur place (N puissance de 2)
+    function makeFFT(N) {
+      var lv = Math.round(Math.log(N) / Math.LN2), rev = new Uint32Array(N), cs = new Float64Array(N / 2), sn = new Float64Array(N / 2), i, j, k;
+      for (i = 0; i < N; i++) { j = 0; for (k = 0; k < lv; k++) j |= ((i >> k) & 1) << (lv - 1 - k); rev[i] = j; }
+      for (i = 0; i < N / 2; i++) { cs[i] = Math.cos(-TAU * i / N); sn[i] = Math.sin(-TAU * i / N); }
+      return function (re, im) {
+        var size, half, step, a, b, wr, wi, tr, ti, t;
+        for (i = 0; i < N; i++) { j = rev[i]; if (j > i) { t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; } }
+        for (size = 2; size <= N; size <<= 1) {
+          half = size >> 1; step = N / size;
+          for (a = 0; a < N; a += size) {
+            for (k = 0; k < half; k++) {
+              b = a + k + half; wr = cs[k * step]; wi = sn[k * step];
+              tr = re[b] * wr - im[b] * wi; ti = re[b] * wi + im[b] * wr;
+              re[b] = re[a + k] - tr; im[b] = im[a + k] - ti;
+              re[a + k] += tr; im[a + k] += ti;
+            }
+          }
+        }
+      };
+    }
+    // Trames de 1024 échantillons (saut 256) : flux spectral (hausses de magnitude, échelle log) et niveau dB
+    function frames(x) {
+      var fft = makeFFT(NF), K = NF / 2 + 1, win = new Float64Array(NF), i, k, n;
+      for (i = 0; i < NF; i++) win[i] = 0.5 - 0.5 * Math.cos(TAU * i / NF);
+      var nF = x.length < NF ? 1 : Math.floor((x.length - NF) / HOP) + 1;
+      var flux = new Float64Array(nF), db = new Float64Array(nF);
+      var re = new Float64Array(NF), im = new Float64Array(NF), prev = new Float64Array(K), cur = new Float64Array(K), sc = 200 / NF;
+      for (n = 0; n < nF; n++) {
+        var s0 = n * HOP, e2 = 0, f = 0, d, v, tmp;
+        for (i = 0; i < NF; i++) { v = s0 + i < x.length ? x[s0 + i] : 0; re[i] = v * win[i]; im[i] = 0; e2 += v * v; }
+        db[n] = 10 * Math.log(e2 / NF + 1e-12) / Math.LN10;
+        fft(re, im);
+        for (k = 0; k < K; k++) {
+          cur[k] = Math.log(1 + sc * Math.sqrt(re[k] * re[k] + im[k] * im[k]));
+          d = cur[k] - prev[k];
+          if (n > 0 && d > 0) f += d;
+        }
+        flux[n] = f;
+        tmp = prev; prev = cur; cur = tmp;
+      }
+      return { flux: flux, db: db, n: nF };
+    }
+    // Attaques de la voix : pics de flux au-dessus d'un seuil adaptatif (médiane mobile x 1,6), écart min 80 ms,
+    // porte de silence (-40 dB sous la crête), moment d'attaque affiné par la pente de l'enveloppe.
+    function attacks(x, sr) {
+      var A = frames(x), F = A.flux, DB = A.db, nF = A.n, i, j, pk = -200, mx = 0;
+      for (i = 0; i < nF; i++) { if (DB[i] > pk) pk = DB[i]; if (F[i] > mx) mx = F[i]; }
+      var gate = Math.max(-55, pk - 40), W = Math.max(4, Math.round(0.25 * sr / HOP)), eps = 0.04 * mx + 1e-9;
+      var thr = new Float64Array(nF), tmp = new Float64Array(2 * W + 1);
+      for (i = 0; i < nF; i++) {
+        var a = Math.max(0, i - W), b = Math.min(nF - 1, i + W), m = 0;
+        for (j = a; j <= b; j++) tmp[m++] = F[j];
+        tmp.subarray(0, m).sort();
+        thr[i] = 1.6 * tmp[m >> 1] + eps;
+      }
+      var gap = Math.max(1, Math.round(0.08 * sr / HOP)), list = [], LM = 6, R100 = Math.max(1, Math.round(0.1 * sr / HOP));
+      for (i = LM; i < nF - LM; i++) {
+        if (F[i] < thr[i] || DB[i] < gate) continue;
+        var isMax = true, jj2;
+        for (jj2 = i - LM; jj2 <= i + LM; jj2++) if (jj2 !== i && (F[jj2] > F[i] || (jj2 > i && F[jj2] === F[i]))) { isMax = false; break; }
+        if (!isMax) continue;
+        // montée d'énergie : au moins 4 dB au-dessus du niveau des 100 ms précédentes
+        var lowDb = 1e9;
+        for (jj2 = Math.max(0, i - R100); jj2 < i; jj2++) if (DB[jj2] < lowDb) lowDb = DB[jj2];
+        if (DB[i] - lowDb < 4) continue;
+        if (list.length && i - list[list.length - 1] < gap) {
+          if (F[i] > F[list[list.length - 1]]) list[list.length - 1] = i;
+          continue;
+        }
+        list.push(i);
+      }
+      var n = list.length, att = new Float64Array(n), wk = new Uint8Array(n), out = 0, lim = x.length;
+      for (j = 0; j < n; j++) {
+        var c = list[j] * HOP + NF / 2, lo = Math.max(0, c - 768), hi = Math.min(lim - 128, c + 384);
+        if (hi < lo) continue;
+        var Q = Math.floor((hi - lo) / 16), q, bq = 0, bs = -1e300, pe = -200, e2, z, E = new Float64Array(Q + 1);
+        for (q = 0; q <= Q; q++) {
+          e2 = 0; z = lo + 16 * q;
+          for (i = z; i < z + 128; i++) e2 += x[i] * x[i];
+          E[q] = 10 * Math.log(e2 / 128 + 1e-12) / Math.LN10;
+        }
+        for (q = 0; q < Q; q++) if (E[q + 1] - E[q] > bs) { bs = E[q + 1] - E[q]; bq = q; }
+        for (q = bq; q <= Math.min(Q, bq + Math.round(0.15 * sr / 16)); q++) if (E[q] > pe) pe = E[q];
+        att[out] = (lo + 16 * bq + 64) / sr;
+        wk[out] = pe < pk - 28 ? 0 : 1; // souffle / bruit faible : non déplacé
+        out++;
+      }
+      return { att: att.slice(0, out), wk: wk.slice(0, out) };
+    }
+    function mixOf(ch) {
+      var nc = ch.length, L = ch[0].length, m = new Float32Array(L), i, c;
+      for (c = 0; c < nc; c++) { var d = ch[c]; for (i = 0; i < L; i++) m[i] += d[i] / nc; }
+      return m;
+    }
+    // Peigne d'impulsions : meilleure phase pour un tempo donné (moyenne de la fonction d'attaque sur les temps)
+    function bestPhase(o, n, fr, bpm, step) {
+      var P = 60 * fr / bpm, best = -1e300, bph = 0, ph, k, p, i0, f, sum, cnt, mm;
+      for (ph = 0; ph < P; ph += step) {
+        sum = 0; cnt = 0;
+        for (k = 0; ; k++) {
+          p = ph + k * P;
+          if (p > n - 1) break;
+          i0 = Math.floor(p); f = p - i0;
+          sum += (i0 + 1 < n) ? o[i0] * (1 - f) + o[i0 + 1] * f : o[i0];
+          cnt++;
+        }
+        mm = cnt ? sum / cnt : -1e300;
+        if (mm > best) { best = mm; bph = ph; }
+      }
+      return { s: best, ph: bph };
+    }
+    // Tempo et premier temps de l'instru. bpmFix > 0 : phase seule à ce tempo ; sinon recherche 70-180 BPM
+    // (préférence 80-160 : un demi ou double tempo de même score est remplacé)
+    function instru(x, sr, bpmFix, prog) {
+      var A = frames(x), F = A.flux, n = A.n, fr = sr / HOP, i, mean = 0, sd = 0;
+      for (i = 0; i < n; i++) mean += F[i];
+      mean /= n;
+      var o = new Float64Array(n);
+      for (i = 0; i < n; i++) { o[i] = F[i] - mean; sd += o[i] * o[i]; }
+      sd = Math.sqrt(sd / n) || 1;
+      function toSec(bpm, r) { return posmod(r.ph / fr + NF / 2 / sr, 60 / bpm); }
+      if (bpmFix > 0) {
+        var rf = bestPhase(o, n, fr, bpmFix, 0.25);
+        return { bpm: bpmFix, ph: toSec(bpmFix, rf), conf: rf.s / sd };
+      }
+      var bb = 70, bs = -1e300, b, r;
+      for (b = 70; b <= 180.0001; b += 0.1) {
+        r = bestPhase(o, n, fr, b, 0.5);
+        if (r.s > bs) { bs = r.s; bb = b; }
+        if (prog && Math.round((b - 70) * 10) % 22 === 0) prog(0.8 * (b - 70) / 110);
+      }
+      var c0 = bb;
+      for (b = c0 - 0.1; b <= c0 + 0.1001; b += 0.01) {
+        r = bestPhase(o, n, fr, b, 0.25);
+        if (r.s > bs) { bs = r.s; bb = b; }
+      }
+      if (prog) prog(0.85);
+      var rb = bestPhase(o, n, fr, bb, 0.25), pick = { b: bb, s: rb.s, ph: rb.ph };
+      if (bb < 80 || bb > 160) {
+        var alts = [bb / 2, bb * 2], k2;
+        for (k2 = 0; k2 < 2; k2++) {
+          var ab = alts[k2];
+          if (ab < 80 || ab > 160) continue;
+          var ra = bestPhase(o, n, fr, ab, 0.25);
+          if (ra.s >= rb.s - 0.1 * Math.abs(rb.s)) { pick = { b: ab, s: ra.s, ph: ra.ph }; break; }
+        }
+      }
+      if (prog) prog(1);
+      return { bpm: pick.b, ph: toSec(pick.b, pick), conf: pick.s / sd };
+    }
+    // Rendu : décalage global, quantification des attaques, étirement WSOLA par segment (hauteur conservée)
+    function render(m, prog) {
+      var ch = m.ch, sr = m.sr, nc = ch.length, L = ch[0].length, i, c, j, q;
+      var att = m.att, wk = m.wk, s = m.s, ph = m.ph, sw = m.sw || 0, F = m.force / 100, tol = m.tol / 1000, nA = att.length;
+      var mono = mixOf(ch);
+      // 1) décalage global d (±250 ms), défini modulo la subdivision (on préfère le plus petit |d|)
+      var d = 0, bestV = -1e300, wsum = 0;
+      for (i = 0; i < nA; i++) wsum += wk[i];
+      if (wsum > 0) {
+        for (q = -250; q <= 250; q++) {
+          var dd = q / 1000, sum = 0;
+          for (i = 0; i < nA; i++) if (wk[i]) sum += Math.cos(TAU * (att[i] + dd - ph) / s);
+          var v = sum / wsum - 0.1 * Math.abs(dd) / s;
+          if (v > bestV) { bestV = v; d = dd; }
+        }
+      }
+      // 2) grille : point le plus proche (avec swing sur les temps impairs)
+      function near(u) {
+        var k0 = Math.round((u - ph) / s), best = 1e300, bq = u, k, p, dist;
+        for (k = k0 - 1; k <= k0 + 1; k++) {
+          p = ph + k * s + ((sw > 0 && (k & 1)) ? sw * s : 0);
+          dist = Math.abs(p - u);
+          if (dist < best) { best = dist; bq = p; }
+        }
+        return bq;
+      }
+      var y = new Float64Array(nA), mv = new Float64Array(nA), eb = 0, ea = 0, nb = 0, nm = 0, last = -1e300;
+      for (i = 0; i < nA; i++) {
+        var u = att[i] + d, off = near(u) - u, mvv = 0;
+        if (wk[i]) {
+          nb++; eb += Math.abs(off);
+          if (Math.abs(off) >= tol && Math.abs(off) <= s / 2) { mvv = off * F; if (mvv !== 0) nm++; }
+        }
+        var yy = u + mvv;
+        if (yy < last + 0.001) yy = last + 0.001; // ordre conservé
+        y[i] = yy; mv[i] = mvv; last = yy;
+      }
+      for (i = 0; i < nA; i++) if (wk[i]) ea += Math.abs(near(y[i]) - y[i]);
+      // 3) points de contrôle entrée -> sortie (temps en s) ; début et fin suivent le décalage global
+      var X = new Float64Array(nA + 2), Y = new Float64Array(nA + 2);
+      X[0] = 0; Y[0] = d;
+      for (i = 0; i < nA; i++) { X[i + 1] = att[i]; Y[i + 1] = y[i]; }
+      X[nA + 1] = L / sr; Y[nA + 1] = L / sr + d;
+      var outC = [];
+      for (c = 0; c < nc; c++) outC.push(new Float32Array(L));
+      // WSOLA : fenêtre 30 ms (Hann), recouvrement 50 %, recherche ±10 ms
+      var N = 2 * Math.round(0.015 * sr), Hs = N / 2, SM = Math.round(0.010 * sr), hann = new Float64Array(N), w0 = new Float64Array(N);
+      for (i = 0; i < N; i++) { hann[i] = 0.5 - 0.5 * Math.cos(TAU * i / N); w0[i] = i < Hs ? 1 : hann[i]; }
+      var LD = Math.floor(L / 4), xd = new Float32Array(LD);
+      for (i = 0; i < LD; i++) xd[i] = 0.25 * (mono[4 * i] + mono[4 * i + 1] + mono[4 * i + 2] + mono[4 * i + 3]);
+      function fades(seg, Lo, nf) {
+        var f = Math.min(nf, Math.floor(Lo / 4)), jj, cc;
+        if (f < 1) return;
+        for (cc = 0; cc < seg.length; cc++) {
+          var a = seg[cc];
+          for (jj = 0; jj < f; jj++) { a[jj] *= jj / f; a[Lo - 1 - jj] *= jj / f; }
+        }
+      }
+      function fitSeg(Xs, Lin, Lo) {
+        var res = [], n2 = Math.min(Lin, Lo), cc, jj;
+        for (cc = 0; cc < nc; cc++) {
+          var o = new Float32Array(Lo), src = ch[cc];
+          for (jj = 0; jj < n2; jj++) o[jj] = src[Xs + jj];
+          res.push(o);
+        }
+        return res;
+      }
+      function bestMatch(refP, nomP, lo, hi) {
+        var nomC = clampN(Math.round(nomP), lo, hi), Hd = Hs >> 2, rD = refP >> 2, bd = 0, bv = -1e300, dd2, ii, vv, cD;
+        var Sd = SM >> 2, nD = nomC >> 2, loD = lo >> 2, hiD = hi >> 2;
+        if (refP + Hs > L || rD + Hd > LD) return nomC;
+        for (dd2 = -Sd; dd2 <= Sd; dd2++) {
+          cD = nD + dd2;
+          if (cD < loD || cD > hiD) continue;
+          vv = 0;
+          for (ii = 0; ii < Hd; ii++) vv += xd[rD + ii] * xd[cD + ii];
+          if (vv > bv) { bv = vv; bd = dd2; }
+        }
+        var centre = nomC + 4 * bd, bf = centre, bvf = -1e300, e, cc2, v2;
+        for (e = -4; e <= 4; e++) {
+          cc2 = centre + e;
+          if (cc2 < lo || cc2 > hi) continue;
+          v2 = 0;
+          for (ii = 0; ii < Hs; ii++) v2 += mono[refP + ii] * mono[cc2 + ii];
+          if (v2 > bvf) { bvf = v2; bf = cc2; }
+        }
+        return clampN(bf, lo, hi);
+      }
+      function wsola(Xs, Xe, Lo) {
+        var alpha = Lo / (Xe - Xs), Ha = Hs / alpha, K = Math.ceil(Lo / Hs), acc = [], cc3, k2, lo = Xs, hi = Xe - N;
+        for (cc3 = 0; cc3 < nc; cc3++) acc.push(new Float32Array(K * Hs + N));
+        function frame(p, w, kk) {
+          var base = kk * Hs, c4, n4;
+          for (c4 = 0; c4 < nc; c4++) {
+            var src = ch[c4], dst = acc[c4];
+            for (n4 = 0; n4 < N; n4++) dst[base + n4] += w[n4] * src[p + n4];
+          }
+        }
+        var prev = lo;
+        frame(prev, w0, 0);
+        for (k2 = 1; k2 < K; k2++) {
+          var best = bestMatch(prev + Hs, prev + Ha, lo, hi);
+          frame(best, hann, k2);
+          prev = best;
+        }
+        var res = [];
+        for (cc3 = 0; cc3 < nc; cc3++) res.push(acc[cc3].slice(0, Lo));
+        return res;
+      }
+      var nSeg = nA + 1;
+      for (var sI = 0; sI < nSeg; sI++) {
+        var Xs = clampN(Math.round(X[sI] * sr), 0, L), Xe = clampN(Math.round(X[sI + 1] * sr), 0, L);
+        var ys = Math.round(Y[sI] * sr), ye = Math.round(Y[sI + 1] * sr), Lin = Xe - Xs, Lo = ye - ys;
+        if (Lin > 0 && Lo > 0) {
+          var al = Lo / Lin, seg, nf;
+          if (Math.abs(al - 1) > 5e-4 && al >= 0.7 && al <= 1.4 && Lin >= 2 * N) { seg = wsola(Xs, Xe, Lo); nf = Math.round(0.002 * sr); }
+          else { seg = fitSeg(Xs, Lin, Lo); nf = Math.round(0.005 * sr); }
+          fades(seg, Lo, nf);
+          for (c = 0; c < nc; c++) {
+            var og = outC[c], sg = seg[c];
+            for (j = 0; j < Lo; j++) { var idx = ys + j; if (idx >= 0 && idx < L) og[idx] = sg[j]; }
+          }
+        }
+        if (prog && (sI & 7) === 0) prog(0.1 + 0.9 * sI / nSeg);
+      }
+      return { ch: outC, d: d, eb: nb ? eb / nb : 0, ea: nb ? ea / nb : 0, nb: nb, nm: nm, y: y, mv: mv };
+    }
+    // Point d'entrée : m.op = 'voice' | 'instru' | 'render'. Renvoie { res, transfer }.
+    function run(m, prog) {
+      prog = prog || function () {};
+      if (m.op === 'voice') {
+        var a = attacks(mixOf(m.ch), m.sr);
+        return { res: { att: a.att, wk: a.wk, n: a.att.length }, transfer: [a.att.buffer, a.wk.buffer] };
+      }
+      if (m.op === 'instru') {
+        var r = instru(mixOf(m.ch), m.sr, m.bpm || 0, prog);
+        return { res: r, transfer: [] };
+      }
+      if (m.op === 'render') {
+        var o = render(m, prog);
+        return { res: o, transfer: o.ch.map(function (cc) { return cc.buffer; }).concat([o.y.buffer, o.mv.buffer]) };
+      }
+      throw new Error('opération inconnue');
+    }
+    return { run: run };
+  }
+
+  // ---------- Recalage : état, travail en tâche, analyse, rendu, application ----------
+  var SY = { open: false, src: null, ch: null, sr: 44100, dur: 0, ic: null, bpm: 120, t0: 0, ph: 0, conf: 0,
+    vox: null, out: null, grid: '1/8', force: 70, swing: 0, tol: 15, busy: '', prog: 0,
+    play: null, t0ctx: 0, ab: 'after', rt: null, timer: null, haveVox: false, haveGrid: false, ui: null, pk: {} };
+  var SY_GF = { '1/4': 1, '1/8': 2, '1/16': 4, '1/8T': 3 };
+  var SY_GL = [['1/4', '1/4'], ['1/8', '1/8'], ['1/16', '1/16'], ['1/8T', '1/8T']];
+  var SY_JOB = {}, SY_LAST = {}, SY_SEQ = 0, SY_W = null, SY_WBAD = false, SY_ENG = null;
+  var CSS_SYNC = [
+    '.as-syncov{position:absolute;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;padding:12px;background:rgba(8,6,16,.62);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);}',
+    '.as-syncp{width:min(640px,100%);max-height:100%;overflow:auto;padding:14px 16px 16px;background:linear-gradient(180deg,rgba(40,34,62,.97),rgba(24,20,38,.98));border:1px solid var(--border2,rgba(255,255,255,.16));border-radius:var(--radius,12px);box-shadow:var(--shadow,0 8px 30px rgba(0,0,0,.45));}',
+    '.as-sync-src{font-size:12px;color:var(--muted,#9d95b8);margin:0 0 6px;}',
+    '.as-sync-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:8px 0;}',
+    '.as-sync-row .as-num{width:96px;}',
+    '.as-sync-row .as-chip{min-width:64px;height:34px;padding:0 12px;white-space:nowrap;display:inline-flex;align-items:center;justify-content:center;}',
+    '.as-sync-info{font-size:12px;color:var(--muted,#9d95b8);min-height:16px;}',
+    '.as-sync-sl{display:flex;align-items:center;gap:6px;flex:1;min-width:200px;}',
+    '.as-sync-sl .as-lbl{min-width:76px;}',
+    '.as-sync-sl .as-srange{flex:1;}',
+    '.as-syncwave{display:block;width:100%;height:180px;margin:10px 0 6px;border-radius:var(--radius-sm,9px);background:rgba(0,0,0,.28);border:1px solid var(--border,rgba(255,255,255,.08));}',
+    '.as-sync-stats{font-size:12px;color:var(--text,#efecf8);min-height:16px;font-family:var(--mono);}',
+    '.as-sync-prog{height:4px;border-radius:4px;background:var(--panel3,#2e2747);overflow:hidden;margin:8px 0 4px;}',
+    '.as-sync-progf{height:100%;width:0;background:var(--grad);transition:width 120ms;}',
+    '.as-sync-msg{font-size:12px;color:var(--muted,#9d95b8);min-height:16px;}',
+    '.as-sync-foot{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;margin-top:12px;}',
+    '@media (max-width:820px){.as-syncov{align-items:flex-end;padding:0;}.as-syncp{width:100%;max-height:92%;border-radius:18px 18px 0 0;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));}}'
+  ].join('\n');
+  function pmod(a, b) { var r = a % b; return r < 0 ? r + b : r; }
+  function fr1(v, d) { return (+v).toFixed(d === undefined ? 1 : d).replace('.', ','); }
+  function syncEngObj() { if (!SY_ENG) SY_ENG = syncEngine(); return SY_ENG; }
+  // Worker créé à partir d'un Blob (le moteur est sérialisé tel quel)
+  function syncWorker() {
+    if (SY_WBAD) return null;
+    if (SY_W) return SY_W;
+    try {
+      var body = 'var E=(' + syncEngine.toString() + ')();self.onmessage=function(e){var m=e.data,id=m.id;' +
+        'var o=E.run(m,function(p){self.postMessage({id:id,p:p});});self.postMessage({id:id,res:o.res},o.transfer);};';
+      var url = URL.createObjectURL(new Blob([body], { type: 'text/javascript' }));
+      SY_W = new Worker(url);
+      SY_W.onmessage = syncOnMsg;
+      SY_W.onerror = function () {
+        SY_WBAD = true; SY_W = null;
+        var pend = SY_JOB; SY_JOB = {};
+        Object.keys(pend).forEach(function (id) { syncRunLocal(+id, pend[id]); });
+      };
+    } catch (e) { SY_WBAD = true; SY_W = null; }
+    return SY_W;
+  }
+  function syncOnMsg(e) {
+    var d = e.data, j = SY_JOB[d.id];
+    if (!j) return;
+    if (d.p != null) {
+      if (SY_LAST[j.kind] === d.id) { SY.prog = d.p; renderSyncProg(); }
+      return;
+    }
+    delete SY_JOB[d.id];
+    syncDone(d.id, j, d.res);
+  }
+  function syncDone(id, j, res) {
+    if (!Object.keys(SY_JOB).length) SY.busy = '';
+    SY.prog = 0;
+    if (SY_LAST[j.kind] === id) j.cb(res);
+    renderSync();
+  }
+  // Repli sur le fil principal (calcul complet, sans progression fine)
+  function syncRunLocal(id, j) {
+    setTimeout(function () {
+      var o = syncEngObj().run(j.msg, function (p) { if (SY_LAST[j.kind] === id) { SY.prog = p; renderSyncProg(); } });
+      delete SY_JOB[id];
+      syncDone(id, j, o.res);
+    }, 0);
+  }
+  // Lance une tâche ; seule la dernière tâche de chaque type (kind) est appliquée
+  function syncRun(kind, op, msg, transfer, label, cb) {
+    var id = ++SY_SEQ;
+    msg.op = op; msg.id = id;
+    SY_LAST[kind] = id;
+    var j = { kind: kind, msg: msg, cb: cb };
+    SY_JOB[id] = j;
+    SY.busy = label; SY.prog = 0;
+    var w = syncWorker();
+    if (w) {
+      try { w.postMessage(msg, transfer || []); }
+      catch (e) { SY_WBAD = true; SY_W = null; syncRunLocal(id, j); }
+    } else {
+      syncRunLocal(id, j);
+    }
+    renderSync();
+    return id;
+  }
+  function syncGrid() {
+    var s = 60 / SY.bpm / SY_GF[SY.grid], base = SY.src ? SY.src.start : 0;
+    return { s: s, ph: pmod(SY.t0 - base, s), sw: (SY.grid === '1/8' || SY.grid === '1/16') ? SY.swing / 100 : 0 };
+  }
+  // Temps des points de grille (en secondes de la prise), pour l'affichage
+  function gridTimes(dur) {
+    var g = syncGrid(), out = [], k0 = Math.floor(-g.ph / g.s) - 1, k, base, t;
+    for (k = k0; ; k++) {
+      base = g.ph + k * g.s;
+      if (base > dur) break;
+      t = base + ((g.sw > 0 && (k & 1)) ? g.sw * g.s : 0);
+      if (t >= 0 && t <= dur) out.push(t);
+    }
+    return out;
+  }
+  function openSync(src) {
+    if (st.recording || st.recPending) { setStatus('Termine l’enregistrement avant de recaler.', true); return; }
+    if (!src || !src.buffer) { setStatus('Sélectionne une prise ou un clip à recaler.', true); return; }
+    stopSync();
+    var b = src.buffer, sr = b.sampleRate, s0 = Math.max(0, Math.round(src.offset * sr));
+    var n = Math.min(b.length - s0, Math.round(src.duration * sr));
+    if (n < sr * 0.5) { setStatus('Prise trop courte pour être recalée.', true); return; }
+    SY.src = src; SY.sr = sr; SY.dur = n / sr; SY.out = null; SY.vox = null; SY.ab = 'after';
+    SY.ch = [];
+    for (var c = 0; c < Math.min(2, b.numberOfChannels); c++) SY.ch.push(b.getChannelData(c).slice(s0, s0 + n));
+    if (SY.ch.length === 1) SY.ch.push(SY.ch[0].slice());
+    SY.pk = {};
+    var tr = instruTrack();
+    SY.ic = tr ? firstClipOf(tr) : null;
+    SY.bpm = st.bpm;
+    SY.haveVox = false; SY.haveGrid = !SY.ic; SY.t0 = 0; SY.ph = 0;
+    SY.open = true;
+    if (SY.ui) SY.ui.ov.hidden = false;
+    syncAnalyzeVoice();
+    syncAnalyzeInstru(false);
+    renderSync();
+  }
+  function closeSync() {
+    stopSync();
+    clearTimeout(SY.rt); SY.rt = null;
+    SY.open = false;
+    if (SY.ui) SY.ui.ov.hidden = true;
+  }
+  function syncAnalyzeVoice() {
+    var m = { ch: SY.ch.map(function (c) { return new Float32Array(c); }), sr: SY.sr };
+    var tr = m.ch.map(function (c) { return c.buffer; });
+    syncRun('voice', 'voice', m, tr, 'Analyse des attaques de la voix…', function (r) {
+      if (!SY.open) return;
+      SY.vox = { att: r.att, wk: r.wk, n: r.n };
+      SY.haveVox = true;
+      syncRequestRender();
+    });
+  }
+  // Tempo (full = recherche 70-180 BPM) ou phase seule au tempo courant
+  function syncAnalyzeInstru(full) {
+    var ic = SY.ic;
+    if (!ic) { SY.t0 = 0; SY.haveGrid = true; syncRequestRender(); renderSync(); return; }
+    var b = ic.buffer, sr = b.sampleRate, s0 = Math.round(ic.offset * sr);
+    var n = Math.min(b.length - s0, Math.round(Math.min(ic.duration, 120) * sr));
+    var L = b.getChannelData(0).slice(s0, s0 + n);
+    var m = { ch: [L], sr: sr, bpm: full ? 0 : SY.bpm };
+    syncRun('instru', 'instru', m, [L.buffer], full ? 'Détection du tempo de l’instru…' : 'Recherche du premier temps…', function (r) {
+      if (!SY.open) return;
+      if (full) SY.bpm = Math.round(r.bpm * 10) / 10;
+      SY.ph = r.ph;
+      SY.t0 = ic.start + r.ph;
+      SY.conf = r.conf;
+      SY.haveGrid = true;
+      syncRequestRender();
+    });
+  }
+  function syncRequestRender() {
+    if (!SY.open) return;
+    clearTimeout(SY.rt);
+    SY.rt = setTimeout(syncRenderNow, 120);
+  }
+  function syncRenderNow() {
+    SY.rt = null;
+    if (!SY.open || !SY.haveVox || !SY.haveGrid || !SY.vox) return;
+    var g = syncGrid();
+    var m = { ch: SY.ch.map(function (c) { return new Float32Array(c); }), sr: SY.sr, att: new Float64Array(SY.vox.att),
+      wk: new Uint8Array(SY.vox.wk), s: g.s, ph: g.ph, sw: g.sw, force: SY.force, tol: SY.tol };
+    var tr = m.ch.map(function (c) { return c.buffer; }).concat([m.att.buffer, m.wk.buffer]);
+    syncRun('render', 'render', m, tr, 'Calcul du recalage…', function (r) {
+      if (!SY.open) return;
+      var ctx = getCtx(), L = r.ch[0].length, buf = ctx.createBuffer(2, L, SY.sr);
+      buf.copyToChannel(r.ch[0], 0); buf.copyToChannel(r.ch[1] || r.ch[0], 1);
+      SY.out = { buf: buf, info: r };
+      SY.pk.A = null;
+    });
+  }
+  // Sources : prise (Mes prises) ou clip sélectionné (Édition)
+  function syncSrcTake(tk) {
+    var c = clipOfTake(tk);
+    return { take: tk, name: 'Prise ' + tk.num, buffer: tk.buffer, trackId: tk.trackId,
+      start: c ? c.start : tk.start, offset: c ? c.offset : tk.offset, duration: c ? c.duration : tk.duration,
+      fadeIn: c ? c.fadeIn : tk.fadeIn, fadeOut: c ? c.fadeOut : tk.fadeOut, gainDb: c ? c.gainDb : tk.gainDb,
+      curve: c ? c.curve : tk.curve, clip: null };
+  }
+  function syncSrcClip(c) {
+    return { take: c.takeId ? takeById(c.takeId) : null, clip: c, name: c.name, buffer: c.buffer, trackId: c.trackId,
+      start: c.start, offset: c.offset, duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve };
+  }
+  // Applique le recalage : nouvelle prise « (recalée) » active ; l'originale passe en réserve (annulable)
+  function syncApply() {
+    if (!SY.open || !SY.out || SY.busy) { setStatus('Attends la fin du calcul avant d’appliquer.', true); return; }
+    if (st.recording) return;
+    var S = SY.src, out = SY.out, tk0 = S.take;
+    if (!trackById(S.trackId)) { setStatus('Piste introuvable : rien n’a été appliqué.', true); return; }
+    if (!tk0 || !takeById(tk0.id)) {
+      if (!S.clip) { setStatus('Source introuvable : rien n’a été appliqué.', true); return; }
+      st.takeSeq += 1;
+      tk0 = { id: uid('k'), trackId: S.trackId, num: st.takeSeq, name: 'Prise ' + st.takeSeq, buffer: S.buffer, at: Date.now(), lat: 0,
+        base: S.start, start: S.start, offset: S.offset, duration: S.duration, fadeIn: S.fadeIn, fadeOut: S.fadeOut,
+        gainDb: S.gainDb, curve: S.curve, nudge: 0 };
+      st.takes.push(tk0);
+      S.clip.takeId = tk0.id;
+    }
+    st.takeSeq += 1;
+    var I = out.info, tk = { id: uid('k'), trackId: S.trackId, num: st.takeSeq, name: 'Prise ' + st.takeSeq + ' (recalée)',
+      buffer: out.buf, at: Date.now(), lat: tk0.lat || 0, base: S.start, start: S.start, offset: 0, duration: out.buf.duration,
+      fadeIn: S.fadeIn || 0, fadeOut: S.fadeOut || 0, gainDb: S.gainDb || 0, curve: S.curve || st.curve, nudge: 0,
+      sync: { bpm: SY.bpm, grid: SY.grid, force: SY.force, swing: SY.swing, tol: SY.tol, delta: Math.round(I.d * 1000) / 1000, src: tk0.num } };
+    st.takes.push(tk);
+    var clip = useTake(tk);
+    if (!clip) { setStatus('Piste introuvable : rien n’a été appliqué.', true); return; }
+    st.booth.lastId = tk.id;
+    closeSync();
+    edited('Recaler la prise ' + tk0.num);
+    var ret = -I.d * 1000;
+    setStatus('Prise recalée ajoutée : ' + (ret >= 0 ? 'décalage global ' + Math.round(ret) + ' ms, ' : 'avance ' + Math.round(-ret) + ' ms, ') + I.nm + ' attaque(s) déplacée(s). La prise d’origine reste en réserve (Ctrl+Z pour annuler).');
+  }
+  function syncSetProjectBpm() {
+    st.bpm = clamp(Math.round(SY.bpm), 20, 300);
+    edited('Tempo du projet');
+    renderSync();
+  }
+
+  // Lecture A/B : avant = prise d'origine, après = prise recalée ; l'instru joue par-dessus
+  function stopSync() {
+    var p = SY.play;
+    SY.play = null;
+    if (SY.timer) { clearInterval(SY.timer); SY.timer = null; }
+    if (p) p.nodes.forEach(function (n) { try { n.stop(); } catch (e) { /* déjà arrêté */ } });
+    if (SY.ui) renderSync();
+  }
+  function syncPlay() {
+    if (!SY.open || st.recording) return;
+    if (SY.play) { stopSync(); return; }
+    var c = getCtx();
+    if (c.state !== 'running') c.resume().catch(noop);
+    var t0 = c.currentTime + 0.08, dur = SY.dur, P0 = SY.src.start, nodes = [];
+    var gA = c.createGain(), gB = c.createGain(), gI = c.createGain();
+    gA.connect(c.destination); gB.connect(c.destination); gI.connect(c.destination);
+    gI.gain.value = 0.8;
+    gA.gain.value = SY.ab === 'before' ? 1 : 0;
+    gB.gain.value = SY.ab === 'after' ? 1 : 0;
+    var a = c.createBufferSource();
+    a.buffer = SY.src.buffer; a.connect(gA);
+    a.start(t0, SY.src.offset, dur);
+    nodes.push(a);
+    if (SY.out) {
+      var b = c.createBufferSource();
+      b.buffer = SY.out.buf; b.connect(gB);
+      b.start(t0, 0, Math.min(dur, SY.out.buf.duration));
+      nodes.push(b);
+    }
+    var ic = SY.ic;
+    if (ic) {
+      var rel = P0 - ic.start, ib = c.createBufferSource();
+      ib.buffer = ic.buffer; ib.connect(gI);
+      if (rel >= 0) { if (ic.duration - rel > 0) ib.start(t0, ic.offset + rel, Math.min(ic.duration - rel, dur)); }
+      else if (dur + rel > 0) ib.start(t0 - rel, ic.offset, Math.min(ic.duration, dur + rel));
+      nodes.push(ib);
+    }
+    SY.play = { nodes: nodes, gA: gA, gB: gB, ctx: c };
+    SY.t0ctx = t0;
+    a.onended = function () { if (SY.play && SY.play.nodes[0] === a) stopSync(); };
+    SY.timer = setInterval(syncDraw, 50);
+    renderSync();
+  }
+  function syncSetAB(which) {
+    SY.ab = which;
+    if (SY.play) {
+      var now = SY.play.ctx.currentTime;
+      SY.play.gA.gain.setTargetAtTime(which === 'before' ? 1 : 0, now, 0.01);
+      SY.play.gB.gain.setTargetAtTime(which === 'after' ? 1 : 0, now, 0.01);
+    }
+    renderSync();
+  }
+  // Enveloppe (min/max par colonne) d'un canal, mise en cache par largeur
+  function syncPeaks(arr, W, key) {
+    var c = SY.pk[key];
+    if (c && c.W === W && c.arr === arr) return c;
+    var n = arr.length, step = n / W, mn = new Float32Array(W), mx = new Float32Array(W), x, s0, s1, i, v, lo, hi;
+    for (x = 0; x < W; x++) {
+      s0 = Math.floor(x * step); s1 = Math.min(n, Math.max(s0 + 1, Math.floor((x + 1) * step)));
+      lo = 0; hi = 0;
+      for (i = s0; i < s1; i++) { v = arr[i]; if (v < lo) lo = v; if (v > hi) hi = v; }
+      mn[x] = lo; mx[x] = hi;
+    }
+    c = { W: W, arr: arr, mn: mn, mx: mx };
+    SY.pk[key] = c;
+    return c;
+  }
+  function drawPeaks(g, pk, cy, hh, W) {
+    for (var x = 0; x < W; x++) {
+      var a = cy - clamp(pk.mx[x], -1, 1) * hh, b = cy - clamp(pk.mn[x], -1, 1) * hh;
+      g.fillRect(x, a, 1, Math.max(1, b - a));
+    }
+  }
+  // Canevas : haut = prise d'origine + attaques (violet) ; bas = recalée + nouvelles attaques (cyan) ; traits = déplacements
+  function syncDraw() {
+    var U = SY.ui;
+    if (!U || !SY.open) return;
+    var cv = U.cv, W = Math.max(40, Math.round(cv.clientWidth)), H = 180, dpr = window.devicePixelRatio || 1;
+    if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+    var g = cv.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, W, H);
+    var dur = SY.dur || 1, i, x;
+    function X(t) { return t / dur * W; }
+    g.strokeStyle = 'rgba(255,255,255,0.10)'; g.lineWidth = 1; g.beginPath();
+    gridTimes(dur).forEach(function (t) { var gx = Math.round(X(t)) + 0.5; g.moveTo(gx, 0); g.lineTo(gx, H); });
+    g.stroke();
+    g.fillStyle = 'rgba(239,236,248,0.55)';
+    drawPeaks(g, syncPeaks(SY.ch[0], W, 'B'), 46, 34, W);
+    if (SY.out) {
+      g.fillStyle = 'rgba(34,211,238,0.75)';
+      drawPeaks(g, syncPeaks(SY.out.buf.getChannelData(0), W, 'A'), 134, 34, W);
+    }
+    if (SY.vox) {
+      var att = SY.vox.att;
+      g.strokeStyle = '#a855f7'; g.lineWidth = 2; g.beginPath();
+      for (i = 0; i < att.length; i++) { x = Math.round(X(att[i])) + 0.5; g.moveTo(x, 0); g.lineTo(x, 12); }
+      g.stroke();
+      if (SY.out) {
+        var I = SY.out.info;
+        g.strokeStyle = '#22d3ee'; g.beginPath();
+        for (i = 0; i < I.y.length; i++) { x = Math.round(X(I.y[i])) + 0.5; g.moveTo(x, H - 12); g.lineTo(x, H); }
+        g.stroke();
+        g.strokeStyle = 'rgba(168,85,247,0.85)'; g.lineWidth = 1; g.beginPath();
+        for (i = 0; i < att.length; i++) {
+          if (!I.mv[i]) continue;
+          g.moveTo(X(att[i]), 60); g.lineTo(X(I.y[i]), 120);
+        }
+        g.stroke();
+      }
+    }
+    if (SY.play) {
+      var pos = SY.play.ctx.currentTime - SY.t0ctx;
+      if (pos >= 0 && pos <= dur) { g.strokeStyle = '#ffffff'; g.lineWidth = 1.5; g.beginPath(); x = X(pos); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); }
+    }
+  }
+  function renderSyncProg() {
+    var U = SY.ui;
+    if (!U || !SY.open) return;
+    U.progF.style.width = Math.round((SY.busy ? SY.prog : 0) * 100) + '%';
+    U.msg.textContent = SY.busy ? SY.busy + (SY.prog ? ' ' + Math.round(SY.prog * 100) + ' %' : '') : '';
+  }
+  // Met à jour toute la feuille de recalage
+  function renderSync() {
+    var U = SY.ui;
+    if (!U || !SY.open || !SY.src) return;
+    var S = SY.src;
+    U.src.textContent = S.name + ' · ' + fmtDur(SY.dur) + ' · ' + (SY.ic ? 'instru : ' + SY.ic.name : 'pas d’instru : grille du projet');
+    if (document.activeElement !== U.bpm) U.bpm.value = (Math.round(SY.bpm * 10) / 10).toFixed(1);
+    U.info.textContent = SY.ic ? ('Premier temps à ' + fr1(SY.ph, 3) + ' s de l’instru') : 'Pas d’instru : la grille part de 0 s du projet';
+    U.gridChips.forEach(function (o) { var on = o.key === SY.grid; o.b.classList.toggle('on', on); o.b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
+    if (document.activeElement !== U.force.r) { U.force.r.value = SY.force; U.force.v.textContent = SY.force + ' %'; }
+    if (document.activeElement !== U.swing.r) { U.swing.r.value = SY.swing; U.swing.v.textContent = SY.swing + ' %'; }
+    if (document.activeElement !== U.tol.r) { U.tol.r.value = SY.tol; U.tol.v.textContent = SY.tol + ' ms'; }
+    var txt = '';
+    if (SY.out) {
+      var I = SY.out.info, ret = -I.d * 1000;
+      txt = (Math.abs(ret) < 1 ? 'Voix à l’heure' : (ret > 0 ? 'Ta voix était en retard de ' + Math.round(ret) + ' ms en moyenne' : 'Ta voix était en avance de ' + Math.round(-ret) + ' ms en moyenne'))
+        + ' · ' + I.nb + ' attaque(s) · écart à la grille : ' + Math.round(I.eb * 1000) + ' ms → ' + Math.round(I.ea * 1000) + ' ms · ' + I.nm + ' déplacée(s)';
+    } else if (SY.vox) {
+      txt = SY.vox.n + ' attaque(s) détectée(s).';
+    }
+    U.stats.textContent = txt;
+    renderSyncProg();
+    var busy = !!SY.busy;
+    setIcon(U.play, SY.play ? 'pause' : 'play');
+    U.play._lbl.textContent = SY.play ? 'Stop' : 'Écouter';
+    U.abB.classList.toggle('on', SY.ab === 'before'); U.abB.setAttribute('aria-pressed', SY.ab === 'before' ? 'true' : 'false');
+    U.abA.classList.toggle('on', SY.ab === 'after'); U.abA.setAttribute('aria-pressed', SY.ab === 'after' ? 'true' : 'false');
+    U.apply.disabled = busy || !SY.out || !SY.out.info.nb;
+    U.redetect.disabled = busy;
+    U.setBpm.disabled = busy;
+    syncDraw();
+  }
+  // Feuille « Recaler sur le temps » (créée une fois, masquée)
+  function syncSlider(parent, label, min, max, step, onInput, fmt) {
+    var wrap = el('span', 'as-sync-sl');
+    wrap.appendChild(lbl(label));
+    var r = inp('range', 'as-srange');
+    r.min = min; r.max = max; r.step = step;
+    var v = el('span', 'as-sval', '');
+    r.addEventListener('input', function () { v.textContent = fmt(+r.value); onInput(+r.value); });
+    wrap.appendChild(r); wrap.appendChild(v);
+    parent.appendChild(wrap);
+    return { r: r, v: v };
+  }
+  function buildSync(p) {
+    var ov = el('div', 'as-syncov');
+    ov.hidden = true;
+    var box = el('div', 'as-syncp');
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-label', 'Recaler sur le temps');
+    var head = el('div', 'as-sh-head');
+    head.appendChild(el('div', 'as-sh-title', 'Recaler sur le temps'));
+    head.appendChild(ibtn(null, 'close', '', 'Fermer sans appliquer', function () { closeSync(); }, 'as-x'));
+    box.appendChild(head);
+    var U = { ov: ov };
+    U.src = el('div', 'as-sync-src', '');
+    box.appendChild(U.src);
+    // Tempo
+    var r1 = el('div', 'as-sync-row');
+    r1.appendChild(lbl('Tempo'));
+    U.bpm = inp('number', 'as-num');
+    U.bpm.min = 40; U.bpm.max = 240; U.bpm.step = 0.1;
+    U.bpm.setAttribute('aria-label', 'Tempo de l’instru en BPM');
+    U.bpm.addEventListener('change', function () {
+      SY.bpm = clamp(+U.bpm.value || 120, 40, 240);
+      syncAnalyzeInstru(false);
+    });
+    r1.appendChild(U.bpm);
+    r1.appendChild(lbl('BPM'));
+    U.redetect = ibtn(r1, 'metro', 'Détecter', 'Détecter le tempo et le premier temps de l’instru', function () { syncAnalyzeInstru(true); });
+    U.setBpm = ibtn(r1, 'check', 'Mettre au BPM du projet', 'Enregistrer ce tempo comme tempo du projet', function () { syncSetProjectBpm(); });
+    box.appendChild(r1);
+    U.info = el('div', 'as-sync-info', '');
+    box.appendChild(U.info);
+    // Grille
+    var r2 = el('div', 'as-sync-row');
+    r2.appendChild(lbl('Grille'));
+    U.gridChips = SY_GL.map(function (o) {
+      var b = chip(o[1], 'Grille ' + o[1], false, 'as-sgrid', function () { SY.grid = o[0]; renderSync(); syncRequestRender(); });
+      r2.appendChild(b);
+      return { key: o[0], b: b };
+    });
+    box.appendChild(r2);
+    // Réglages
+    var r3 = el('div', 'as-sync-row');
+    U.force = syncSlider(r3, 'Force', 0, 100, 1, function (v) { SY.force = v; syncRequestRender(); }, function (v) { return v + ' %'; });
+    U.swing = syncSlider(r3, 'Swing', 0, 60, 1, function (v) { SY.swing = v; syncRequestRender(); }, function (v) { return v + ' %'; });
+    U.tol = syncSlider(r3, 'Tolérance', 0, 60, 1, function (v) { SY.tol = v; syncRequestRender(); }, function (v) { return v + ' ms'; });
+    box.appendChild(r3);
+    // Visualisation
+    U.cv = el('canvas', 'as-syncwave');
+    U.cv.setAttribute('aria-label', 'Forme d’onde avec attaques et grille');
+    box.appendChild(U.cv);
+    U.stats = el('div', 'as-sync-stats', '');
+    box.appendChild(U.stats);
+    var pg = el('div', 'as-sync-prog');
+    U.progF = el('div', 'as-sync-progf');
+    pg.appendChild(U.progF);
+    box.appendChild(pg);
+    U.msg = el('div', 'as-sync-msg', '');
+    box.appendChild(U.msg);
+    // Écoute
+    var r4 = el('div', 'as-sync-row');
+    U.play = cbtn(r4, 'play', 'Écouter', '', function () { syncPlay(); });
+    U.abB = chip('Avant', 'Écouter la prise d’origine', false, 'as-sab', function () { syncSetAB('before'); });
+    U.abA = chip('Après', 'Écouter la prise recalée', false, 'as-sab', function () { syncSetAB('after'); });
+    r4.appendChild(U.abB); r4.appendChild(U.abA);
+    box.appendChild(r4);
+    // Pied
+    var foot = el('div', 'as-sync-foot');
+    ibtn(foot, 'close', 'Annuler', 'Fermer sans modifier la prise', function () { closeSync(); });
+    U.apply = ibtn(foot, 'check', 'Appliquer', 'Ajouter la prise recalée et la rendre active', function () { syncApply(); });
+    box.appendChild(foot);
+    ov.appendChild(box);
+    p.appendChild(ov);
+    ov.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeSync(); });
+    window.addEventListener('resize', function () { if (SY.open) syncDraw(); });
+    SY.ui = U;
+  }
+
   // ---------- API publique ----------
   window.AudioStudio = {
     init: init,
+    // Accès de test au moteur de recalage (fonction autonome)
+    _syncEngine: function () { return syncEngine(); },
     // Affiche une vue : 'booth' (Cabine), 'edit' (Édition) ou 'mix' (Mixage)
     showView: function (name) { if (st.root && (name === 'booth' || name === 'edit' || name === 'mix')) showTab(name); },
     saveNow: function () { return saveNow(); },
