@@ -4734,6 +4734,13 @@ select.ie-in{width:auto}
   var cvCache = new Map(); // canevas de formes d'onde, clé = contenu
 
   // ---------- Utilitaires ----------
+  // Filtre de fichiers audio. Sur iPhone/iPad, « audio/* » grise parfois des fichiers valides
+  // (m4a, mp3 exportés par d'autres applis) : on n'y met aucun filtre et on vérifie au décodage.
+  function audioAccept() {
+    var ua = navigator.userAgent || '';
+    var ios = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    return ios ? '' : 'audio/*,.mp3,.m4a,.aac,.wav,.aif,.aiff,.caf,.flac,.ogg,.opus,.mp4,.m4v,.mov,video/mp4';
+  }
   function uid(p) { return p + (st.nextId++); }
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
   function noop() {}
@@ -7945,7 +7952,7 @@ select.ie-in{width:auto}
   function buildFileBar(p) {
     var bar = el('div', 'as-filebar');
     var file = inp('file', null);
-    file.accept = 'audio/*';
+    file.accept = audioAccept();
     file.multiple = true;
     file.hidden = true;
     file.addEventListener('change', function () {
@@ -8383,7 +8390,7 @@ select.ie-in{width:auto}
     wired: { t: 'Filaire / EarPods', s: 'Latence ≈ 40 ms', lat: 40, ic: 'headphones' },
     bt: { t: 'Bluetooth (JBL, AirPods…)', s: 'Latence ≈ 250 ms', lat: 250, ic: 'bt' },
     none: { t: 'Sans casque', s: 'Anti-écho activé, retour micro coupé', lat: 40, ic: 'speaker' },
-    btmix: { t: 'Casque Bluetooth pour écouter + micro de l’iPhone pour chanter', s: 'Latence ≈ 250 ms · voix de meilleure qualité', lat: 250, ic: 'bt', mix: true }
+    btmix: { t: 'Casque Bluetooth pour écouter + micro de l’iPhone pour chanter', s: 'Expérimental : souvent bloqué par Safari sur iPhone (utilise plutôt Filaire)', lat: 250, ic: 'bt', mix: true }
   };
   var HEADSET_ORDER = ['wired', 'bt', 'none', 'btmix'];
   var HP_KEY = 'sf_booth_headset';
@@ -8952,7 +8959,7 @@ select.ie-in{width:auto}
     u.boothWin = win; u.hp = {}; u.presets = {}; u.tiles = {}; u.bFileMode = 'new'; u.sheets = [];
     u.bStatus = el('div', 'as-bmsg', '');
     u.bStatus.setAttribute('role', 'status'); u.bStatus.setAttribute('aria-live', 'polite');
-    u.bFile = inp('file', null); u.bFile.accept = 'audio/*'; u.bFile.hidden = true;
+    u.bFile = inp('file', null); u.bFile.accept = audioAccept(); u.bFile.hidden = true;
     u.bFile.addEventListener('change', function () {
       var f = u.bFile.files && u.bFile.files[0];
       u.bFile.value = '';
