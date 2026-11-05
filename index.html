@@ -6107,6 +6107,17 @@ select.ie-in{width:auto}
     var buf = c.createBuffer(2, n, sr), L = buf.getChannelData(0), R = buf.getChannelData(1);
     L.set(chans[0]);
     R.set(chans[chans.length > 1 ? 1 : 0]);
+    // Volume voix automatique : une prise trop faible (micro Bluetooth, micro éloigné) est remontée
+    // pour que sa crête atteigne environ -1 dBFS (au plus +24 dB), sans toucher aux prises déjà fortes.
+    var pk = 0;
+    for (var pi = 0; pi < n; pi++) { var av = Math.abs(L[pi]); if (av > pk) pk = av; av = Math.abs(R[pi]); if (av > pk) pk = av; }
+    var boostDb = 0;
+    if (pk > 0.0005 && pk < 0.5) {
+      var g = Math.min(0.89 / pk, 15.85);
+      boostDb = 20 * Math.log10(g);
+      for (var pj = 0; pj < n; pj++) { L[pj] *= g; R[pj] *= g; }
+    }
+    take.boostDb = boostDb;
     st.takeSeq += 1;
     var name = 'Prise ' + st.takeSeq;
     // Chaque prise est conservée ; sur la même zone, la précédente passe en réserve (non jouée)
@@ -6119,7 +6130,7 @@ select.ie-in{width:auto}
     renderAll();
     if (!opt.noHist) pushHistory(name);
     saveNow();
-    if (!opt.noHist) setStatus(name + ' ajoutée à « ' + t.name + ' » : ' + clip.duration.toFixed(3) + ' s, latence compensée de ' + take.lat + ' ms.');
+    if (!opt.noHist) setStatus(name + ' ajoutée à « ' + t.name + ' » : ' + clip.duration.toFixed(3) + ' s, latence compensée de ' + take.lat + ' ms' + (take.boostDb > 0.5 ? ', voix trop faible remontée de +' + take.boostDb.toFixed(1) + ' dB' : '') + (pk <= 0.0005 ? ' — attention : prise quasi silencieuse, vérifie le micro choisi' : '') + '.');
   }
   function dropTrack(tid) {
     st.clips = st.clips.filter(function (c) { return c.trackId !== tid; });
