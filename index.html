@@ -4705,8 +4705,9 @@ select.ie-in{width:auto}
     stripOpen: false, spot: null, narrow: false, sheet: false, redraw: false, anchor: null,
     mic: { dev: '', voice: false, latency: 0, countIn: 0, monitor: false, monDb: 0, instru: 100, route: 'auto' },
     takes: [], // prises (buffer + paramètres) ; une prise active possède un clip dont takeId vaut son id
-    booth: { hp: null, micErr: false, count: true, start: 'zero', lastId: null, acap: false, prev: null, prevId: null },
-    sess: { pending: false, ok: true, found: null, saved: {}, bufs: [], lastKey: '', seq: 0, busy: null, again: false, t: null }
+    projId: null, pname: '', bview: 'lib', pro: false, // son ouvert, nom, vue (bibliothèque / studio), mode pro
+    booth: { hp: null, micErr: false, count: true, start: 'zero', lastId: null, acap: false, prev: null, prevId: null, autoSync: false, bal: 50, tkId: null, fxBusy: false },
+    sess: { pending: false, ok: true, found: null, saved: {}, bufs: [], lastKey: '', seq: 0, busy: null, again: false, t: null, index: null, pseq: 0 }
   };
   // Moteur d'enregistrement : flux micro, chaîne de capture, prise en cours, calibrage
   var rx = {
@@ -4833,6 +4834,10 @@ select.ie-in{width:auto}
     test: '<path d="M2 12h3l2-6 4 12 4-12 2 6h5"/>',
     sliders: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>'
   };
+  ICONS.gear = '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>';
+  ICONS.chevL = '<path d="m15 18-6-6 6-6"/>';
+  ICONS.more = '<circle cx="12" cy="5" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.4" fill="currentColor" stroke="none"/>';
+  ICONS.noise = '<path d="M2 12h3l2-4 2 8 2-10 2 9 2-3h7"/>';
   ICONS.bt = '<path d="m7 7 10 10-5 5V2l5 5L7 17"/>';
   ICONS.phone = '<rect x="7" y="2" width="10" height="20" rx="2"/><line x1="11" y1="18" x2="13" y2="18"/>';
   ICONS.ear = '<path d="M6 8.5a6 6 0 0 1 12 0c0 3-2 4-2 7a3 3 0 0 1-6 0"/>';
@@ -5382,7 +5387,7 @@ select.ie-in{width:auto}
     };
   }
   function serial(s) {
-    return JSON.stringify(s, function (k, v) { return k === 'buffer' ? bufId(v) : v; });
+    return JSON.stringify(s, function (k, v) { return (k === 'buffer' || k === 'raw') ? bufId(v) : v; });
   }
   function applySnap(s) {
     var selId = st.selClip && st.selClip.id;
@@ -5865,7 +5870,6 @@ select.ie-in{width:auto}
   // Clic sur ● (ou R) : même geste -> ctx.resume() puis getUserMedia, puis capture et lecture au même instant
   function startRecording() {
     if (st.recording || st.recPending || rx.ending) return;
-    if (st.sess.pending) { setStatus('Choisis d’abord « Reprendre » ou « Nouvelle session » : sans cela, la prise ne serait pas sauvegardée.', true); return; }
     kick();
     var c = getCtx();
     if (c.state !== 'running') c.resume().catch(noop);
@@ -6131,6 +6135,7 @@ select.ie-in{width:auto}
     if (!opt.noHist) pushHistory(name);
     saveNow();
     if (!opt.noHist) setStatus(name + ' ajoutée à « ' + t.name + ' » : ' + clip.duration.toFixed(3) + ' s, latence compensée de ' + take.lat + ' ms' + (take.boostDb > 0.5 ? ', voix trop faible remontée de +' + take.boostDb.toFixed(1) + ' dB' : '') + (pk <= 0.0005 ? ' — attention : prise quasi silencieuse, vérifie le micro choisi' : '') + '.');
+    if (!opt.noHist) openTakeSheet(tk);
   }
   function dropTrack(tid) {
     st.clips = st.clips.filter(function (c) { return c.trackId !== tid; });
@@ -6308,6 +6313,11 @@ select.ie-in{width:auto}
     s.instru.value = st.mic.instru;
     s.instruVal.textContent = st.mic.instru + ' %';
     s.cancel.disabled = !(rx.lastTake && !st.recording);
+    s.auto.classList.toggle('on', !!st.booth.autoSync);
+    s.auto.setAttribute('aria-pressed', st.booth.autoSync ? 'true' : 'false');
+    if (document.activeElement !== s.bpm) s.bpm.value = st.bpm;
+    s.pro.classList.toggle('on', !!st.pro);
+    s.pro.setAttribute('aria-pressed', st.pro ? 'true' : 'false');
   }
 
   // Niveau d'entrée (vumètre) : pic et RMS du flux micro, mis à jour à chaque image
@@ -8117,7 +8127,7 @@ select.ie-in{width:auto}
     sh.hidden = true;
     st.ui.sheetEl = sh;
     var head = el('div', 'as-sh-head');
-    head.appendChild(el('div', 'as-sh-title', 'Enregistrement'));
+    head.appendChild(el('div', 'as-sh-title', 'Réglages'));
     head.appendChild(ibtn(null, 'close', '', 'Fermer le panneau', function () { toggleSheet(false); }, 'as-x'));
     sh.appendChild(head);
     var s = {};
@@ -8244,6 +8254,33 @@ select.ie-in{width:auto}
     secCnt.appendChild(irow);
     sh.appendChild(secCnt);
 
+    // Cabine : casque, recalage automatique, mode pro
+    var secCab = secEl('Cabine');
+    var brow = el('div', 'as-row');
+    brow.appendChild(lbl('Tempo (BPM)'));
+    s.bpm = inp('number', 'as-num');
+    s.bpm.min = 20; s.bpm.max = 300; s.bpm.step = 1;
+    s.bpm.setAttribute('aria-label', 'Tempo en BPM (réglages)');
+    s.bpm.addEventListener('change', function () { st.bpm = clamp(Math.round(+s.bpm.value) || 120, 20, 300); markDirty(); renderAll(); });
+    brow.appendChild(s.bpm);
+    secCab.appendChild(brow);
+    var crow3 = el('div', 'as-row');
+    ibtn(crow3, 'headphones', 'Changer de casque', 'Choisir le casque (filaire recommandé) et lancer le test', function () { toggleSheet(false); openHpSheet(null); }, 'as-wide');
+    secCab.appendChild(crow3);
+    var arow = el('div', 'as-row');
+    s.auto = chip('Recaler automatiquement après chaque prise', 'Applique « Sur le temps » à chaque nouvelle prise', false, 'as-wide', function () {
+      st.booth.autoSync = !st.booth.autoSync; markDirty(); updateSheet();
+    });
+    s.auto.setAttribute('aria-label', 'Recaler automatiquement après chaque prise');
+    arow.appendChild(s.auto);
+    secCab.appendChild(arow);
+    var prow2 = el('div', 'as-row');
+    s.pro = chip('Mode pro : onglets Édition et Mixage', 'Affiche les onglets Édition et Mixage dans la Cabine', false, 'as-wide', togglePro);
+    s.pro.setAttribute('aria-label', 'Mode pro : onglets Édition et Mixage');
+    prow2.appendChild(s.pro);
+    secCab.appendChild(prow2);
+    sh.appendChild(secCab);
+
     // Pied : annuler la prise
     var foot = el('div', 'as-row');
     s.cancel = ibtn(foot, 'undo', 'Annuler la prise', 'Supprime la dernière prise (équivaut à Ctrl+Z)', cancelTake, 'as-wide');
@@ -8317,12 +8354,6 @@ select.ie-in{width:auto}
     edited('Supprimer la prise ' + num);
     setStatus('Prise ' + num + ' supprimée (Ctrl+Z pour annuler).');
   }
-  function boothKeep(tk) {
-    st.booth.lastId = null;
-    markDirty();
-    setStatus('Prise ' + tk.num + ' gardée.');
-    renderBooth();
-  }
   function boothListen(tk) {
     if (st.recording || st.recPending || !isActive(tk)) return;
     stopPreview();
@@ -8334,24 +8365,6 @@ select.ie-in{width:auto}
     var s = st.booth.prev;
     st.booth.prev = null; st.booth.prevId = null;
     if (s) { s.onended = null; try { s.stop(); } catch (e) { /* déjà arrêté */ } }
-  }
-  function previewTake(tk) {
-    if (st.recording || st.recPending) return;
-    if (st.booth.prevId === tk.id) { stopPreview(); renderBooth(); return; }
-    stopPreview();
-    if (st.playing) pause();
-    var c = getCtx();
-    if (c.state !== 'running') c.resume().catch(noop);
-    var s = c.createBufferSource();
-    s.buffer = tk.buffer;
-    s.connect(c.destination);
-    s.onended = function () {
-      if (st.booth.prev === s) { st.booth.prev = null; st.booth.prevId = null; renderBooth(); }
-    };
-    s.start();
-    st.booth.prev = s; st.booth.prevId = tk.id;
-    setStatus('Écoute de la prise ' + tk.num + ' seule.');
-    renderBooth();
   }
   function wakeOn() {
     try {
@@ -8397,22 +8410,6 @@ select.ie-in{width:auto}
   // Volume en pourcentage (0-100 %, 100 % = 0 dB), affiché simplement
   function pctOf(t) { return !t || t.db <= -60 ? 0 : Math.round(Math.pow(10, t.db / 20) * 100); }
   function setPct(t, p) { t.db = p <= 0 ? -60 : clamp(20 * Math.log10(p / 100), -60, 0); applyMixLive(); }
-  function presetOf(t) {
-    if (!t) return 'none';
-    var ty = t.inserts.filter(Boolean).map(function (i) { return i.type; });
-    if (!ty.length) return 'none';
-    if (ty.indexOf('reverb') >= 0) return 'echo';
-    if (ty.indexOf('dist') >= 0) return 'radio';
-    if (ty.indexOf('eq') >= 0) return 'studio';
-    return '';
-  }
-  function applyPreset(name) {
-    var v = voiceTrack() || addTrack('Voix');
-    var list = PRESETS[name] || [];
-    v.inserts = [0, 1, 2, 3].map(function (i) { var p = list[i]; return p ? { type: p.type, params: cloneP(p.params) } : null; });
-    st.insSel = null;
-    edited('Effet voix : ' + PRESET_LABEL[name]);
-  }
   function importInstru(file) {
     var c = getCtx();
     setStatus('Chargement de l’instru…');
@@ -8423,6 +8420,7 @@ select.ie-in{width:auto}
       st.booth.acap = false;
       addClip(t, buf, name, 0);
       edited('Importer l’instru');
+      detectBpm(buf);
       setStatus('Instru chargée : ' + name + ' (' + fmtDur(buf.duration) + ').');
     }).catch(function (err) {
       setStatus('Import impossible : ' + file.name + ' (' + ((err && err.message) || err) + ')', true);
@@ -8442,6 +8440,7 @@ select.ie-in{width:auto}
       : (k === 'btmix' ? 'Casque Bluetooth + micro de l’iPhone (latence ' + h.lat + ' ms). Lance le test pour vérifier le routage.'
       : 'Casque : ' + h.t + ' (latence ' + h.lat + ' ms).'));
     markDirty();
+    if (st.ui.shHp && !st.ui.shHp.ov.hidden) { closeHpSheet(); return; }
     renderBooth();
   }
 
@@ -8557,6 +8556,7 @@ select.ie-in{width:auto}
   function boothRec(pos) {
     if (st.recording) { stopRecording(); return; }
     if (st.recPending) return;
+    if (!st.booth.hp) { openHpSheet(function () { boothRec(pos); }); return; }
     if (st.lyr.cal) lyrCalEnd(false); // un calage en cours s'arrête avant la prise
     var b = st.booth;
     st.mic.countIn = b.count ? 4 : 0;
@@ -8569,15 +8569,9 @@ select.ie-in{width:auto}
     renderBooth();
     kick();
   }
-  function micPill() {
-    if (st.booth.micErr) return ['err', 'Micro : refusé'];
-    if (rx.stream) return ['ok', 'Micro : prêt'];
-    return ['', 'Micro : pas encore ouvert'];
-  }
   function setPill(node, cls, text) { node.className = 'as-pill' + (cls ? ' ' + cls : ''); node.textContent = text; }
   function fmtDur(t) { var s = Math.round(Math.max(0, t)); return Math.floor(s / 60) + ':' + pad(s % 60, 2); }
   function clockOf(ms) { var d = new Date(ms); return pad(d.getHours(), 2) + ':' + pad(d.getMinutes(), 2); }
-  function fmtDate(ms) { var d = new Date(ms); return pad(d.getDate(), 2) + '/' + pad(d.getMonth() + 1, 2) + '/' + d.getFullYear() + ' à ' + pad(d.getHours(), 2) + 'h' + pad(d.getMinutes(), 2); }
   function msText(n) { return (n > 0 ? '+' : '') + n + ' ms'; }
   function cbtn(parent, ic, label, cls, fn) {
     var b = el('button', 'as-cbtn' + (cls ? ' ' + cls : ''));
@@ -8599,15 +8593,6 @@ select.ie-in{width:auto}
     parent.appendChild(b);
     return b;
   }
-  function card(parent, n, title) {
-    var c = el('section', 'as-card');
-    var h = el('div', 'as-card-h');
-    h.appendChild(el('span', 'as-step-n', String(n)));
-    h.appendChild(el('span', null, title));
-    c.appendChild(h);
-    parent.appendChild(c);
-    return c;
-  }
   function vrow(parent, label, min, max, step) {
     var row = el('div', 'as-mrow');
     row.appendChild(el('span', 'as-mlbl', label));
@@ -8618,11 +8603,6 @@ select.ie-in{width:auto}
     row.appendChild(r); row.appendChild(v);
     parent.appendChild(row);
     return { row: row, r: r, v: v };
-  }
-  function syncVol(row, t) {
-    row.r.disabled = !t;
-    if (document.activeElement !== row.r) row.r.value = pctOf(t);
-    row.v.textContent = pctOf(t) + ' %';
   }
 
   // ---------- Mes paroles : texte, prompteur (Manuel / Auto / Synchronisé), calage sur l’instru ----------
@@ -8933,7 +8913,7 @@ select.ie-in{width:auto}
   // Panneau prompteur : placé dans la carte ON AIR pendant la prise, sinon dans l'étape 3 (écoute, aperçu)
   function renderPanel(rec, has) {
     var u = st.ui, L = st.lyr;
-    var show = (has && (rec || st.playing)) || (L.preview && has);
+    var show = has && st.bview === 'studio';
     var host = rec ? u.recLive : u.recIdle, ref = rec ? u.stopBtn : u.recWrap;
     var moved = u.lp.parentNode !== host || u.lp.nextSibling !== ref;
     if (moved) host.insertBefore(u.lp, ref);
@@ -8969,109 +8949,48 @@ select.ie-in{width:auto}
   function buildBooth(p) {
     var u = st.ui, win = el('div', 'as-win as-booth-win'), box = el('div', 'as-booth');
     win.hidden = true; win.appendChild(box);
-    u.boothWin = win; u.hp = {}; u.presets = {};
-    // Barre d'état : micro, casque, temps, sauvegarde
-    var bar = el('div', 'as-bstat');
-    u.bMic = el('span', 'as-pill', ''); u.bHp = el('span', 'as-pill', '');
-    u.bTime = el('span', 'as-bstat-t', '00:00');
-    u.bSaved = el('span', 'as-bstat-s', '');
-    bar.appendChild(u.bMic); bar.appendChild(u.bHp); bar.appendChild(u.bTime); bar.appendChild(u.bSaved);
-    box.appendChild(bar);
+    u.boothWin = win; u.hp = {}; u.presets = {}; u.tiles = {}; u.bFileMode = 'new'; u.sheets = [];
     u.bStatus = el('div', 'as-bmsg', '');
     u.bStatus.setAttribute('role', 'status'); u.bStatus.setAttribute('aria-live', 'polite');
-    box.appendChild(u.bStatus);
     u.bFile = inp('file', null); u.bFile.accept = 'audio/*'; u.bFile.hidden = true;
     u.bFile.addEventListener('change', function () {
-      if (u.bFile.files && u.bFile.files[0]) importInstru(u.bFile.files[0]);
+      var f = u.bFile.files && u.bFile.files[0];
       u.bFile.value = '';
+      if (!f) return;
+      if (u.bFileMode === 'new') createSound(f); else importInstru(f);
     });
-    box.appendChild(u.bFile);
+    win.appendChild(u.bFile);
 
-    // 1. Ton instru
-    var c1 = card(box, 1, 'Ton instru');
-    u.iEmpty = el('div', 'as-stack');
-    cbtn(u.iEmpty, 'import', 'Importer l’instru', 'xl', function () { u.bFile.click(); });
-    u.acapNote = el('div', 'as-note-b', 'Mode a cappella : tu enregistres sans instrumentale.');
-    u.acapNote.hidden = true;
-    u.iEmpty.appendChild(u.acapNote);
-    var acap = el('button', 'as-link', 'Pas d’instru (a cappella)');
-    acap.type = 'button';
-    acap.addEventListener('click', function () {
-      st.booth.acap = true; markDirty();
-      setStatus('Mode a cappella : tu enregistres sans instrumentale.');
-      renderBooth();
-    });
-    u.iEmpty.appendChild(acap);
-    c1.appendChild(u.iEmpty);
-    u.iFull = el('div', 'as-stack'); u.iFull.hidden = true;
-    u.iName = el('div', 'as-iname', ''); u.iMeta = el('div', 'as-imeta', '');
-    u.mini = el('canvas', 'as-mini');
-    u.iFull.appendChild(u.iName); u.iFull.appendChild(u.iMeta); u.iFull.appendChild(u.mini);
-    var r1 = el('div', 'as-row2');
-    u.iPlay = cbtn(r1, 'play', 'Écouter', 'lg', function () { if (st.recording) return; stopPreview(); togglePlay(); });
-    cbtn(r1, 'import', 'Changer', 'lg', function () { u.bFile.click(); });
-    u.iFull.appendChild(r1);
-    u.iVol = vrow(u.iFull, 'Volume instru', 0, 100, 1);
-    c1.appendChild(u.iFull);
-    u.iVol.r.addEventListener('input', function () {
-      var t = instruTrack(); if (!t) return;
-      setPct(t, +u.iVol.r.value); u.iVol.v.textContent = pctOf(t) + ' %';
-    });
-    u.iVol.r.addEventListener('change', function () { pushHistory('Volume instru'); });
+    // Bibliothèque « Mes sons »
+    u.libV = el('div', 'as-lib');
+    var lh = el('div', 'as-lib-h');
+    lh.appendChild(el('h2', 'as-lib-t', 'Mes sons'));
+    u.libCount = el('span', 'as-lib-n', '');
+    lh.appendChild(u.libCount);
+    u.libV.appendChild(lh);
+    cbtn(u.libV, 'plus', 'Nouveau son', 'xl as-newbig', openNewSound);
+    u.libList = el('div', 'as-lib-list');
+    u.libEmpty = el('div', 'as-note', 'Aucun son pour l’instant. Crée ton premier son avec « Nouveau son ».');
+    u.libV.appendChild(u.libList);
+    u.libV.appendChild(u.libEmpty);
+    box.appendChild(u.libV);
 
-    // 2. Ton casque
-    var c2 = card(box, 2, 'Ton casque');
-    var hps = el('div', 'as-hps');
-    HEADSET_ORDER.forEach(function (k) {
-      var h = HEADSETS[k], b = el('button', 'as-hp' + (h.mix ? ' as-hp-mix' : ''));
-      b.type = 'button';
-      b.innerHTML = h.mix ? '<span class="as-hp-ico">' + icon('headphones') + icon('phone') + '</span>' : icon(h.ic);
-      var tx = el('span', 'as-hp-tx');
-      if (h.mix) tx.appendChild(el('span', 'as-hp-badge', 'Recommandé sur iPhone'));
-      tx.appendChild(el('span', 'as-hp-t', h.t));
-      tx.appendChild(el('span', 'as-hp-s', h.s));
-      b.appendChild(tx);
-      b.setAttribute('aria-pressed', 'false');
-      b.addEventListener('click', function () { boothSetHeadset(k); });
-      u.hp[k] = b; hps.appendChild(b);
-    });
-    c2.appendChild(hps);
-    u.btNote = el('div', 'as-note-b', 'Le micro du casque Bluetooth enregistre en qualité réduite ; si possible, chante dans le micro de l’iPhone.');
-    u.noneNote = el('div', 'as-note-b', 'Sans casque, l’instru sort des haut-parleurs et sera captée par le micro : elle se retrouvera dans ta prise. Le retour micro est coupé.');
-    u.btmixNote = el('div', 'as-note-b', 'L’instru sort dans ton casque Bluetooth, et ta voix est captée par le micro de l’iPhone. Safari ne garantit pas cette combinaison : lance le test pour vérifier.');
-    c2.appendChild(u.btNote); c2.appendChild(u.noneNote); c2.appendChild(u.btmixNote);
-    // Test d'écoute guidé (visible dès qu'un casque est choisi)
-    u.tBtn = cbtn(c2, 'test', 'Tester mon casque et mon micro', 'xl', guideStart);
-    u.guide = el('div', 'as-guide'); u.guide.hidden = true;
-    u.gMic = el('div', 'as-gmic', ''); u.gMsg = el('div', 'as-gmsg', '');
-    u.gMsg.setAttribute('role', 'status'); u.gMsg.setAttribute('aria-live', 'polite');
-    u.gLog = el('div', 'as-glog');
-    u.gAsk = el('div', 'as-gask');
-    u.gAsk.appendChild(el('div', 'as-gq', 'Tu entends le son dans ton casque ?'));
-    var gaRow = el('div', 'as-gopts');
-    cbtn(gaRow, 'check', 'Oui', 'keep', function () { guideAnswer('yes'); });
-    cbtn(gaRow, 'speaker', 'Non, il sort du haut-parleur', '', function () { guideAnswer('speaker'); });
-    cbtn(gaRow, 'close', 'Non, rien', '', function () { guideAnswer('nothing'); });
-    u.gAsk.appendChild(gaRow);
-    u.gHelp = el('div', 'as-ghelp'); u.gHelp.hidden = true;
-    u.gHelp.appendChild(el('div', 'as-note-b', 'Solutions : 1) écouteurs filaires (adaptateur Lightning ou USB-C), 2) casque Bluetooth seul (micro du casque, qualité réduite), 3) sans casque avec l’anti-écho.'));
-    var ghRow = el('div', 'as-gopts');
-    cbtn(ghRow, 'headphones', 'Écouteurs filaires', '', function () { boothSetHeadset('wired'); });
-    cbtn(ghRow, 'bt', 'Casque Bluetooth seul', '', function () { boothSetHeadset('bt'); });
-    cbtn(ghRow, 'speaker', 'Sans casque', '', function () { boothSetHeadset('none'); });
-    u.gHelp.appendChild(ghRow);
-    u.gDone = el('div', 'as-gopts'); u.gDone.hidden = true;
-    cbtn(u.gDone, 'close', 'Fermer le test', 'keep', guideClose);
-    u.gRetry = cbtn(null, 'retry', 'Recommencer le test', '', guideStart);
-    u.gRetry.hidden = true;
-    u.guide.appendChild(u.gMic); u.guide.appendChild(u.gMsg); u.guide.appendChild(u.gLog);
-    u.guide.appendChild(u.gAsk); u.guide.appendChild(u.gHelp); u.guide.appendChild(u.gDone); u.guide.appendChild(u.gRetry);
-    c2.appendChild(u.guide);
-    var fine = el('button', 'as-link', 'Réglage fin (latence, calibrage)');
-    fine.type = 'button';
-    fine.addEventListener('click', function () { toggleSheet(true); });
-    c2.appendChild(fine);
-
+    // Feuilles superposées à la Cabine
+    u.shNew = mkSheet(win, 'Nouveau son');
+    u.shHp = mkSheet(win, 'Ton casque');
+    u.shTake = mkSheet(win, 'Ta prise');
+    u.shExp = mkSheet(win, 'Exporter');
+    u.shMenu = mkSheet(win, 'Son');
+    u.shRen = mkSheet(win, 'Renommer');
+    u.shDel = mkSheet(win, 'Supprimer');
+    u.shLyr = mkSheet(win, 'Mes paroles');
+    buildShNew(u.shNew.body);
+    buildShHp(u.shHp.body);
+    buildShTake(u.shTake.body);
+    buildShExp(u.shExp.body);
+    buildShMenu(u.shMenu.body);
+    buildShRen(u.shRen.body);
+    buildShDel(u.shDel.body);
     // Mes paroles (entre les étapes 2 et 3) : saisie, nettoyage au collage, résumé replié
     var lc = el('section', 'as-card as-lyr');
     var lh = el('div', 'as-card-h');
@@ -9123,8 +9042,7 @@ select.ie-in{width:auto}
     u.lyrTl = el('div', 'as-lyr-tl-list');
     u.lyrTimes.appendChild(u.lyrTl);
     lc.appendChild(u.lyrTimes);
-    box.appendChild(lc);
-    u.lyrCard = lc;
+    u.shLyr.body.appendChild(lc);
 
     // Prompteur : panneau unique, déplacé dans la carte d'enregistrement pendant la prise
     u.lp = el('div', 'as-lp'); u.lp.hidden = true;
@@ -9168,192 +9086,553 @@ select.ie-in{width:auto}
     u.lpCal.appendChild(u.calNext); u.lpCal.appendChild(u.calBtn); u.lpCal.appendChild(calRow);
     u.lp.appendChild(lpBar); u.lp.appendChild(u.lpRow2); u.lp.appendChild(u.pVp); u.lp.appendChild(u.lpCal);
 
-    // 3. Enregistre
-    var c3 = card(box, 3, 'Enregistre');
-    u.step3 = c3;
-    u.recIdle = el('div', 'as-stack');
-    var rOpt = el('div', 'as-opts');
-    u.count = el('button', 'as-sw');
-    u.count.type = 'button';
-    u.count.setAttribute('role', 'switch');
-    u.count.innerHTML = '<span class="as-swk"></span><span>Décompte (1 mesure)</span>';
-    u.count.addEventListener('click', function () { st.booth.count = !st.booth.count; markDirty(); renderBooth(); });
-    rOpt.appendChild(u.count);
-    var rStart = el('div', 'as-opts');
-    rStart.appendChild(el('span', 'as-lbl', 'Départ'));
-    u.startZero = pchip(rStart, 'Début du morceau', function () { st.booth.start = 'zero'; markDirty(); renderBooth(); });
-    u.startHere = pchip(rStart, 'Position actuelle', function () { st.booth.start = 'here'; markDirty(); renderBooth(); });
-    var rBpm = el('div', 'as-opts');
-    rBpm.appendChild(el('span', 'as-lbl', 'Tempo (BPM)'));
-    u.bpm = inp('number', 'as-num');
-    u.bpm.min = 20; u.bpm.max = 300; u.bpm.step = 1;
-    u.bpm.setAttribute('aria-label', 'Tempo en BPM');
-    u.bpm.addEventListener('change', function () {
-      st.bpm = clamp(Math.round(+u.bpm.value) || 120, 20, 300);
+    // ----- Studio : une seule vue (barre du haut, bandeau beat, zone centrale, effets, REC) -----
+    u.stuV = el('div', 'as-studio'); u.stuV.hidden = true;
+    var sTop = el('div', 'as-st-top');
+    cbtn(sTop, 'chevL', 'Mes sons', 'sm as-st-back', showLib);
+    u.stName = el('button', 'as-st-name', ''); u.stName.type = 'button';
+    u.stName.setAttribute('aria-label', 'Renommer le son');
+    u.stName.addEventListener('click', startStRename);
+    u.stNameIn = inp('text', 'as-st-nin');
+    u.stNameIn.maxLength = 60; u.stNameIn.hidden = true;
+    u.stNameIn.setAttribute('aria-label', 'Nom du son');
+    u.stNameIn.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); u.stNameIn.blur(); } });
+    u.stNameIn.addEventListener('blur', commitStRename);
+    sTop.appendChild(u.stName); sTop.appendChild(u.stNameIn);
+    cbtn(sTop, 'export', 'Exporter', 'sm', openExport);
+    ibtn(sTop, 'gear', '', 'Réglages (casque, latence, micro, recalage automatique, mode pro)', function () { toggleSheet(true); }, 'as-gear');
+    u.stuV.appendChild(sTop);
+
+    // Bandeau beat : nom, forme d'onde avec position, pastille BPM, volume du beat
+    var band = el('section', 'as-band');
+    var bR1 = el('div', 'as-band-r1');
+    u.bandName = el('span', 'as-band-name', '');
+    bR1.appendChild(u.bandName);
+    var bpmW = el('label', 'as-bpm-w');
+    bpmW.appendChild(el('span', 'as-bpm-l', 'BPM'));
+    u.bpmIn = inp('number', 'as-bpm');
+    u.bpmIn.min = 20; u.bpmIn.max = 300; u.bpmIn.step = 1;
+    u.bpmIn.setAttribute('aria-label', 'Tempo en BPM');
+    u.bpmIn.addEventListener('change', function () {
+      st.bpm = clamp(Math.round(+u.bpmIn.value) || 120, 20, 300);
       markDirty(); renderAll();
     });
-    rBpm.appendChild(u.bpm);
-    u.recWrap = el('div', 'as-recwrap');
+    bpmW.appendChild(u.bpmIn);
+    bR1.appendChild(bpmW);
+    u.bandTime = el('span', 'as-band-t', '00:00');
+    bR1.appendChild(u.bandTime);
+    band.appendChild(bR1);
+    u.bandWv = el('div', 'as-band-wv');
+    u.bandWave = el('canvas', 'as-band-cv');
+    u.bandPos = el('div', 'as-band-pos');
+    u.bandWv.appendChild(u.bandWave); u.bandWv.appendChild(u.bandPos);
+    band.appendChild(u.bandWv);
+    var bVol = el('div', 'as-band-vol');
+    bVol.appendChild(el('span', 'as-lbl', 'Beat'));
+    u.bandVol = inp('range', 'as-br');
+    u.bandVol.min = 0; u.bandVol.max = 100; u.bandVol.step = 1;
+    u.bandVol.setAttribute('aria-label', 'Volume du beat');
+    u.bandVol.addEventListener('input', function () {
+      var t = instruTrack(); if (!t) return;
+      setPct(t, +u.bandVol.value); u.bandVolV.textContent = pctOf(t) + ' %';
+    });
+    u.bandVol.addEventListener('change', function () { pushHistory('Volume du beat'); });
+    u.bandVolV = el('span', 'as-mval', '');
+    bVol.appendChild(u.bandVol); bVol.appendChild(u.bandVolV);
+    u.bandChg = cbtn(bVol, 'import', 'Changer le beat', 'sm', function () { u.bFileMode = 'change'; u.bFile.click(); });
+    band.appendChild(bVol);
+    u.stuV.appendChild(band);
+
+    // Zone centrale : prompteur des paroles (s'il y en a) ou forme d'onde de la dernière prise
+    u.zone = el('section', 'as-zone');
+    var zH = el('div', 'as-zone-h');
+    zH.appendChild(el('span', 'as-zone-t', 'Ta voix'));
+    cbtn(zH, 'lyrics', 'Paroles', 'sm', openLyrics);
+    u.zone.appendChild(zH);
+    u.recWrap = el('canvas', 'as-zone-cv');   // point d'insertion du prompteur (zone)
+    u.zone.appendChild(u.recWrap);
+    u.zoneEmpty = el('div', 'as-zone-e', 'Ta prise apparaîtra ici après l’enregistrement.');
+    u.zone.appendChild(u.zoneEmpty);
+    u.recIdle = u.zone;
+    u.stuV.appendChild(u.zone);
+
+    // Carrousel de préréglages voix
+    var pw = el('section', 'as-pres-w');
+    pw.appendChild(el('div', 'as-sub', 'Effet voix'));
+    u.pRow = el('div', 'as-pres');
+    u.pRow.setAttribute('role', 'listbox');
+    VPRESETS.forEach(function (d, i) {
+      var b = el('button', 'as-ptile');
+      b.type = 'button';
+      b.style.setProperty('--h', String(i * 41 % 360));
+      var pic = el('span', 'as-ptile-ic'); pic.innerHTML = icon(d[2]);
+      b.appendChild(pic);
+      b.appendChild(el('span', 'as-ptile-n', d[1]));
+      b.setAttribute('aria-label', 'Effet ' + d[1]);
+      b.setAttribute('aria-pressed', 'false');
+      b.addEventListener('click', function () { applyPreset(d[0]); });
+      u.tiles[d[0]] = b; u.pRow.appendChild(b);
+    });
+    pw.appendChild(u.pRow);
+    u.stuV.appendChild(pw);
+
+    // Bas de l'écran : bouton REC (décompte à côté) ; pendant la prise, bloc ON AIR
+    u.bottom = el('section', 'as-bottom');
+    u.recRow = el('div', 'as-recrow');
+    u.count = el('button', 'as-sw as-sw-s');
+    u.count.type = 'button';
+    u.count.setAttribute('role', 'switch');
+    u.count.innerHTML = '<span class="as-swk"></span><span>Décompte</span>';
+    u.count.addEventListener('click', function () { st.booth.count = !st.booth.count; markDirty(); renderBooth(); });
+    u.recRow.appendChild(u.count);
+    var recCol = el('div', 'as-reccol');
+    u.recBox = el('div', 'as-recbox');
     u.ring = el('div', 'as-ring');
     u.recBtn = el('button', 'as-recbig');
     u.recBtn.type = 'button';
     u.recBtn.innerHTML = icon('rec');
     u.recBtn.setAttribute('aria-label', 'Enregistrer');
     u.recBtn.addEventListener('click', function () { boothRec(); });
-    u.recWrap.appendChild(u.ring); u.recWrap.appendChild(u.recBtn);
+    u.recBox.appendChild(u.ring); u.recBox.appendChild(u.recBtn);
+    recCol.appendChild(u.recBox);
     u.recLbl = el('div', 'as-recl', 'Enregistrer');
-    u.recIdle.appendChild(rOpt); u.recIdle.appendChild(rStart); u.recIdle.appendChild(rBpm);
-    u.recIdle.appendChild(u.recWrap); u.recIdle.appendChild(u.recLbl);
-    c3.appendChild(u.recIdle);
-    // Pendant la prise : carte « ON AIR »
-    u.recLive = el('div', 'as-stack'); u.recLive.hidden = true;
+    recCol.appendChild(u.recLbl);
+    u.recRow.appendChild(recCol);
+    u.recRow.appendChild(el('span', 'as-rec-sp'));
+    u.bottom.appendChild(u.recRow);
+
+    u.recLive = el('div', 'as-onair'); u.recLive.hidden = true;
+    u.recMic = el('div', 'as-micl', ''); u.recMic.hidden = true;
     u.cd = el('div', 'as-cd', ''); u.cd.hidden = true;
     u.chrono = el('div', 'as-chrono', '00:00');
     u.lw = el('canvas', 'as-lw');
-    var pg = el('div', 'as-prog');
+    var pgw = el('div', 'as-prog');
     u.prog = el('div', 'as-prog-f');
-    pg.appendChild(u.prog);
+    pgw.appendChild(u.prog);
     u.stopBtn = el('button', 'as-stopbig');
     u.stopBtn.type = 'button';
     u.stopBtn.innerHTML = icon('stop') + '<span>Stop</span>';
     u.stopBtn.setAttribute('aria-label', 'Arrêter l’enregistrement');
     u.stopBtn.addEventListener('click', function () { toggleRecord(); });
-    u.recMic = el('div', 'as-micl', ''); u.recMic.hidden = true;
-    u.recLive.appendChild(u.recMic);
-    u.recLive.appendChild(u.cd); u.recLive.appendChild(u.chrono); u.recLive.appendChild(u.lw);
-    u.recLive.appendChild(pg); u.recLive.appendChild(u.stopBtn);
-    c3.appendChild(u.recLive);
-    // Carte de la dernière prise
-    u.takeCard = el('div', 'as-takec'); u.takeCard.hidden = true;
-    u.takeTitle = el('div', 'as-takec-h', '');
-    u.takeCard.appendChild(u.takeTitle);
-    var tg = el('div', 'as-tgrid');
-    u.tkListen = cbtn(tg, 'play', 'Écouter', '', function () { var tk = takeById(st.booth.lastId); if (tk) boothListen(tk); });
-    u.tkKeep = cbtn(tg, 'check', 'Garder', 'keep', function () { var tk = takeById(st.booth.lastId); if (tk) boothKeep(tk); });
-    u.tkRedo = cbtn(tg, 'retry', 'Refaire', '', function () { var tk = takeById(st.booth.lastId); if (tk) boothRedo(tk); });
-    u.tkDel = cbtn(tg, 'trash', 'Supprimer', 'danger', function () { var tk = takeById(st.booth.lastId); if (tk) boothDelete(tk); });
-    u.takeCard.appendChild(tg);
-    cbtn(u.takeCard, 'metro', 'Recaler sur le temps', 'xl', function () { var tk = takeById(st.booth.lastId); if (tk) openSync(syncSrcTake(tk)); });
-    var cal = el('div', 'as-cal');
-    cal.appendChild(el('span', 'as-mlbl', 'Calage voix'));
-    u.calR = inp('range', 'as-br');
-    u.calR.min = -200; u.calR.max = 200; u.calR.step = 5;
-    u.calR.setAttribute('aria-label', 'Calage voix en millisecondes');
-    u.calV = el('span', 'as-mval', '0 ms');
-    cal.appendChild(u.calR); cal.appendChild(u.calV);
-    u.takeCard.appendChild(cal);
-    u.takeCard.appendChild(el('div', 'as-note', 'Décale la voix par rapport à l’instru (± 200 ms). Écoute en direct possible.'));
-    u.calR.addEventListener('input', function () {
-      var tk = takeById(st.booth.lastId); if (!tk) return;
-      nudgeTake(tk, +u.calR.value);
-      u.calV.textContent = msText(tk.nudge);
-      reloadPlayback();
-    });
-    u.calR.addEventListener('change', function () { if (takeById(st.booth.lastId)) edited('Calage voix'); });
-    c3.appendChild(u.takeCard);
-    // Mes prises
-    c3.appendChild(el('div', 'as-sub', 'Mes prises'));
-    u.tl = el('div', 'as-tl');
-    u.tlEmpty = el('div', 'as-note', 'Aucune prise pour l’instant. Chaque prise s’ajoute ici.');
-    c3.appendChild(u.tl); c3.appendChild(u.tlEmpty);
+    u.recLive.appendChild(u.recMic); u.recLive.appendChild(u.cd); u.recLive.appendChild(u.chrono);
+    u.recLive.appendChild(u.lw); u.recLive.appendChild(pgw); u.recLive.appendChild(u.stopBtn);
+    u.bottom.appendChild(u.recLive);
+    u.stuV.appendChild(u.bottom);
 
-    // 4. Mixe et exporte
-    var c4 = card(box, 4, 'Mixe et exporte');
-    c4.appendChild(el('div', 'as-sub', 'Effet voix'));
-    var pr = el('div', 'as-opts');
-    [['none', 'Aucun'], ['studio', 'Studio'], ['radio', 'Radio'], ['echo', 'Écho']].forEach(function (d) {
-      u.presets[d[0]] = pchip(pr, d[1], function () { applyPreset(d[0]); });
-    });
-    c4.appendChild(pr);
-    u.fVoice = vrow(c4, 'Voix', 0, 100, 1);
-    u.fInst = vrow(c4, 'Instru', 0, 100, 1);
-    u.fVoice.r.addEventListener('input', function () {
-      var t = voiceTrack(); if (!t) return;
-      setPct(t, +u.fVoice.r.value); u.fVoice.v.textContent = pctOf(t) + ' %';
-    });
-    u.fVoice.r.addEventListener('change', function () { pushHistory('Volume voix'); });
-    u.fInst.r.addEventListener('input', function () {
-      var t = instruTrack(); if (!t) return;
-      setPct(t, +u.fInst.r.value); u.fInst.v.textContent = pctOf(t) + ' %';
-    });
-    u.fInst.r.addEventListener('change', function () { pushHistory('Volume instru'); });
-    var acts = el('div', 'as-acts');
-    cbtn(acts, 'play', 'Écouter le résultat', 'xl', function () { if (st.recording) return; stopPreview(); seek(0); play(); });
-    cbtn(acts, 'export', 'Exporter', 'xl', function () { exportMix(); });
-    cbtn(acts, 'wave', 'Ouvrir l’éditeur', 'xl', function () { showTab('edit'); });
-    var exo = el('div', 'as-exp');
-    var exSr = el('select', 'as-sel');
-    exSr.setAttribute('aria-label', 'Fréquence d’export');
-    exSr.title = 'Fréquence d’échantillonnage de l’export';
-    EXP_SR.forEach(function (o) { var op = el('option', null, o[1]); op.value = o[0]; exSr.appendChild(op); });
-    exSr.value = String(st.exp.sr);
-    exSr.addEventListener('change', function () { st.exp.sr = +exSr.value; });
-    var exBits = el('select', 'as-sel');
-    exBits.setAttribute('aria-label', 'Profondeur d’export');
-    exBits.title = 'Profondeur en bits du fichier WAV';
-    EXP_BITS.forEach(function (o) { var op = el('option', null, o[1]); op.value = o[0]; exBits.appendChild(op); });
-    exBits.value = String(st.exp.bits);
-    exBits.addEventListener('change', function () { st.exp.bits = +exBits.value; });
-    var mst = chip(st.exp.master ? 'Master inclus' : 'Master exclu', 'Inclure le master (volume général, limiteur) dans les pistes séparées', st.exp.master, 'as-wide', function () {
-      st.exp.master = !st.exp.master;
-      mst.textContent = st.exp.master ? 'Master inclus' : 'Master exclu';
-      mst.classList.toggle('on', st.exp.master);
-      mst.setAttribute('aria-pressed', st.exp.master ? 'true' : 'false');
-    });
-    exo.appendChild(exSr); exo.appendChild(exBits); exo.appendChild(mst);
-    c4.appendChild(exo);
-    var stemsRow = el('div', 'as-acts');
-    cbtn(stemsRow, 'export', 'Exporter les pistes séparées (.zip)', 'xl', function () { exportStems(); });
-    c4.appendChild(stemsRow);
-    c4.appendChild(acts);
-
+    // Ligne d'état : casque et sauvegarde
+    var sRow = el('div', 'as-stline');
+    u.bHp = el('span', 'as-pill', '');
+    u.bSaved = el('span', 'as-bstat-s', '');
+    sRow.appendChild(u.bHp); sRow.appendChild(u.bSaved);
+    u.stuV.appendChild(sRow);
+    box.appendChild(u.stuV);
     p.appendChild(win);
   }
-  function renderTakeCard() {
-    var u = st.ui, tk = takeById(st.booth.lastId);
-    u.takeCard.hidden = !tk || st.recording;
-    if (!tk) return;
-    u.takeTitle.textContent = 'Prise ' + tk.num + ' · ' + fmtDur(tk.buffer.duration);
-    var act = isActive(tk);
-    u.calR.disabled = !act;
-    u.tkListen.disabled = !act;
-    if (document.activeElement !== u.calR) u.calR.value = tk.nudge || 0;
-    u.calV.textContent = msText(tk.nudge || 0);
+
+  // ---------- Cabine v2 : préréglages, feuilles, rendu, prises (recalage / bruit), réglages ----------
+  // Préréglages voix : [clé, libellé, icône, inserts] (inserts = PRESETS existants ou nouveaux)
+  var VPRESETS = [
+    ['naturel', 'Naturel', 'mic', []],
+    ['studio', 'Studio', 'sliders', PRESETS.studio],
+    ['radio', 'Radio', 'bars', PRESETS.radio],
+    ['echo', 'Écho', 'wave', PRESETS.echo],
+    ['hall', 'Hall', 'bus', [{ type: 'reverb', params: { duration: 4.5, mix: 0.35 } }]],
+    ['lofi', 'Lo-fi', 'strip', [{ type: 'eq', params: { low: 4, mid: -2, high: -10 } }, { type: 'dist', params: { amount: 6 } }]],
+    ['tel', 'Téléphone', 'phone', [{ type: 'eq', params: { low: -18, mid: 6, high: -14 } }, { type: 'dist', params: { amount: 10 } }]],
+    ['dbl', 'Doublage', 'dup', [{ type: 'delay', params: { time: 0.022, feedback: 0, mix: 0.5 } }]]
+  ];
+  var PRO_KEY = 'sf_pro';
+  var varCache = new Map(); // variantes calculées (non sauvegardées) : clé = id de prise + suffixe
+  var fxTok = 0;
+  var CSS_CAB = [
+    '.as-booth-win{position:relative;overflow:hidden;}',
+    '.as-booth-win>.as-booth{flex:1;min-height:0;overflow-x:hidden;overflow-y:auto;-webkit-overflow-scrolling:touch;max-width:560px;}',
+    '.as-root[data-view=booth]:not([data-pro="1"]) .as-tabs{display:none !important;}',
+    '.as-lib{display:flex;flex-direction:column;gap:12px;}',
+    '.as-lib-h{display:flex;align-items:baseline;gap:10px;padding:4px 2px 0;}',
+    '.as-lib-t{margin:0;font-size:22px;font-weight:800;letter-spacing:-.01em;color:var(--text,#efecf8);}',
+    '.as-lib-n{margin-left:auto;font-size:12px;color:var(--muted,#9d95b8);}',
+    '.as-newbig{min-height:64px !important;font-size:17px !important;}',
+    '.as-lib-list{display:flex;flex-direction:column;gap:8px;}',
+    '.as-lib-row{display:flex;align-items:center;gap:12px;padding:8px 8px 8px 8px;border-radius:14px;background:var(--panel,rgba(28,24,44,.86));border:1px solid var(--border,rgba(255,255,255,.08));}',
+    '.as-lib-row.on{border-color:var(--accent2,#a855f7);box-shadow:0 0 0 1px rgba(168,85,247,.45);}',
+    '.as-lib-th{position:relative;flex:none;width:56px;height:56px;border:none;border-radius:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14);}',
+    '.as-lib-thl{font:800 22px/1 var(--font,system-ui),sans-serif;color:#fff;text-shadow:0 1px 8px rgba(0,0,0,.35);}',
+    '.as-lib-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;text-align:left;background:none;border:none;color:inherit;cursor:pointer;padding:4px 0;}',
+    '.as-lib-nm{font-size:16px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.as-lib-mt{font:12px var(--mono,ui-monospace,monospace);color:var(--muted,#9d95b8);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.as-lib-more{flex:none;width:44px;height:44px;border-radius:12px;border:1px solid var(--border,rgba(255,255,255,.08));background:var(--panel2,#241e38);color:var(--text,#efecf8);display:flex;align-items:center;justify-content:center;cursor:pointer;}',
+    '.as-lib-more .as-ico{width:20px;height:20px;}',
+    '.as-ov{position:absolute;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;padding:12px;background:rgba(8,6,16,.62);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);}',
+    '.as-ovs{width:min(560px,100%);max-height:100%;overflow:auto;padding:14px 16px calc(16px + env(safe-area-inset-bottom,0px));background:linear-gradient(180deg,rgba(40,34,62,.97),rgba(24,20,38,.98));border:1px solid var(--border2,rgba(255,255,255,.16));border-radius:var(--radius,12px);box-shadow:var(--shadow,0 8px 30px rgba(0,0,0,.45));}',
+    '.as-ovb{display:flex;flex-direction:column;gap:10px;}',
+    '.as-ovb .as-note-b{margin:0;}',
+    '.as-tsw{display:flex;align-items:center;gap:12px;width:100%;min-height:58px;padding:8px 12px;border-radius:12px;background:var(--panel2,#241e38);border:1px solid var(--border,rgba(255,255,255,.08));color:var(--text,#efecf8);text-align:left;cursor:pointer;}',
+    '.as-tsw:disabled{opacity:.5;cursor:default;}',
+    '.as-tsw-tx{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}',
+    '.as-tsw-tx b{font-size:15px;font-weight:700;}',
+    '.as-tsw-tx small{font-size:12px;color:var(--muted,#9d95b8);line-height:1.3;}',
+    '.as-tog{flex:none;position:relative;width:46px;height:28px;border-radius:999px;background:var(--panel3,#2e2747);border:1px solid var(--border2,rgba(255,255,255,.16));}',
+    '.as-tog::after{content:"";position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;background:#fff;transition:transform 160ms;}',
+    '.as-tsw.on{border-color:var(--ok,#34d399);box-shadow:inset 0 0 0 1px rgba(52,211,153,.35);}',
+    '.as-tsw.on .as-tog{background:linear-gradient(135deg,#34d399,#22d3ee);border-color:transparent;}',
+    '.as-tsw.on .as-tog::after{transform:translateX(18px);}',
+    '.as-tbal,.as-tnudge{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:12px;background:var(--panel2,#241e38);border:1px solid var(--border,rgba(255,255,255,.08));}',
+    '.as-tbal{flex-direction:column;align-items:stretch;}',
+    '.as-tbal-h{display:flex;align-items:center;justify-content:space-between;}',
+    '.as-tnudge{justify-content:space-between;}',
+    '.as-tnudge .as-cbtn{min-width:96px;}',
+    '.as-tchips{display:flex;flex-wrap:wrap;gap:8px;}',
+    '.as-tk-cv{display:block;width:100%;height:96px;border-radius:var(--radius-sm,9px);background:rgba(0,0,0,.28);border:1px solid var(--border,rgba(255,255,255,.08));}',
+    '.as-studio{display:flex;flex-direction:column;gap:10px;min-height:0;}',
+    '.as-st-top{display:flex;align-items:center;gap:8px;min-height:44px;}',
+    '.as-st-top .as-cbtn{min-height:44px;}',
+    '.as-st-name{flex:1;min-width:0;min-height:44px;padding:0 6px;border:none;background:none;color:var(--text,#efecf8);font-size:18px;font-weight:800;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;}',
+    '.as-st-nin{flex:1;min-width:0;height:44px;padding:0 10px;border-radius:10px;border:1px solid var(--accent2,#a855f7);background:var(--bg2,#151223);color:var(--text,#efecf8);font:700 17px var(--font,system-ui),sans-serif;}',
+    '.as-gear{width:44px;min-width:44px;height:44px;padding:0;justify-content:center;}',
+    '.as-st-back .as-ico{width:16px;height:16px;}',
+    '.as-band{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border-radius:14px;background:var(--panel,rgba(28,24,44,.86));border:1px solid var(--border,rgba(255,255,255,.08));}',
+    '.as-band-r1{display:flex;align-items:center;gap:10px;min-width:0;}',
+    '.as-band-name{flex:1;min-width:0;font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+    '.as-bpm-w{display:inline-flex;align-items:center;gap:6px;}',
+    '.as-bpm-l{font-size:11px;letter-spacing:.06em;color:var(--muted,#9d95b8);}',
+    '.as-bpm{width:72px;height:32px;padding:0 8px;border-radius:999px;border:1px solid rgba(34,211,238,.5);background:linear-gradient(135deg,rgba(34,211,238,.16),rgba(168,85,247,.16));color:#fff;font:700 14px var(--mono,ui-monospace,monospace);text-align:center;}',
+    '.as-band-t{font:600 12px var(--mono,ui-monospace,monospace);color:var(--muted,#9d95b8);font-variant-numeric:tabular-nums;}',
+    '.as-band-wv{position:relative;height:50px;border-radius:9px;overflow:hidden;background:rgba(0,0,0,.28);}',
+    '.as-band-cv{display:block;width:100%;height:100%;}',
+    '.as-band-pos{position:absolute;top:0;bottom:0;left:0;width:2px;background:#fff;box-shadow:0 0 8px #fff;pointer-events:none;}',
+    '.as-band-vol{display:flex;align-items:center;gap:8px;min-height:40px;}',
+    '.as-band-vol .as-br{flex:1;min-width:0;}',
+    '.as-band-vol .as-cbtn{min-height:40px;padding:0 10px;}',
+    '.as-zone{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-radius:14px;background:var(--panel,rgba(28,24,44,.86));border:1px solid var(--border,rgba(255,255,255,.08));}',
+    '.as-zone[hidden]{display:none !important;}',
+    '.as-zone-h{display:flex;align-items:center;justify-content:space-between;gap:8px;}',
+    '.as-zone-t{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted,#9d95b8);font-weight:600;}',
+    '.as-zone-h .as-cbtn{min-height:36px;padding:0 10px;}',
+    '.as-zone-cv{display:block;width:100%;height:64px;border-radius:9px;background:rgba(0,0,0,.2);}',
+    '.as-zone-e{font-size:13px;color:var(--muted,#9d95b8);padding:14px 4px;text-align:center;}',
+    '.as-pres-w .as-sub{margin:4px 2px 6px;}',
+    '.as-pres{display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x mandatory;padding:2px 2px 6px;scrollbar-width:none;-webkit-overflow-scrolling:touch;}',
+    '.as-pres::-webkit-scrollbar{display:none;}',
+    '.as-ptile{position:relative;flex:none;width:76px;height:76px;scroll-snap-align:start;border-radius:16px;border:1px solid rgba(255,255,255,.14);background:linear-gradient(145deg,hsl(calc(var(--h) + 0),85%,60%),hsl(calc(var(--h) + 60),80%,38%));color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:4px;padding:6px 4px 7px;cursor:pointer;transition:transform 140ms,box-shadow 140ms;}',
+    '.as-ptile:active{transform:scale(.96);}',
+    '.as-ptile-ic{position:absolute;top:8px;left:0;right:0;display:flex;justify-content:center;}',
+    '.as-ptile-ic .as-ico{width:24px;height:24px;}',
+    '.as-ptile-n{font-size:12px;font-weight:700;text-shadow:0 1px 6px rgba(0,0,0,.4);white-space:nowrap;}',
+    '.as-ptile.on{box-shadow:0 0 0 2px #fff,0 0 18px rgba(255,255,255,.55);}',
+    '.as-recrow{display:flex;align-items:center;justify-content:space-between;gap:8px;}',
+    '.as-rec-sp{flex:1;}',
+    '.as-reccol{display:flex;flex-direction:column;align-items:center;gap:6px;}',
+    '.as-sw-s{min-height:40px;}',
+    '.as-recbox{position:relative;width:96px;height:96px;}',
+    '.as-recbox .as-ring{left:-12px;top:-12px;width:120px;height:120px;}',
+    '.as-recbox .as-recbig{width:96px;height:96px;}',
+    '.as-recbox .as-recbig .as-ico{width:36px;height:36px;}',
+    '.as-recl{font-size:12px;color:var(--muted,#9d95b8);}',
+    '.as-onair{display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:14px;background:rgba(7,6,13,.6);border:1px solid var(--hot,#f43f5e);box-shadow:0 0 22px rgba(244,63,94,.3);}',
+    '.as-onair[hidden]{display:none !important;}',
+    '.as-onair .as-lp{padding:8px;}',
+    '.as-stline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-height:28px;}',
+    '.as-stline .as-bstat-s{margin-left:auto;}',
+    '.as-stline .as-pill{max-width:70%;}',
+    '.as-takec-h{margin:0;}',
+    '.as-takec-sum{font-size:12px;color:var(--muted,#9d95b8);}',
+    '@media (max-width:820px){.as-recbox{width:88px;height:88px;}.as-recbox .as-recbig{width:88px;height:88px;}.as-recbox .as-ring{left:-10px;top:-10px;width:108px;height:108px;}.as-ov{align-items:flex-end;padding:0;}.as-ovs{width:100%;max-height:92%;border-radius:18px 18px 0 0;}.as-lib-t{font-size:20px;}}'
+  ].join('\n');
+
+  // Feuilles : superpositions simples (clic hors feuille ou croix pour fermer)
+  function mkSheet(win, title) {
+    var ov = el('div', 'as-ov'), sh = el('div', 'as-ovs');
+    ov.hidden = true;
+    var head = el('div', 'as-sh-head');
+    var tt = el('div', 'as-sh-title', title);
+    head.appendChild(tt);
+    head.appendChild(ibtn(null, 'close', '', 'Fermer', function () { closeOv(o); }, 'as-x'));
+    sh.appendChild(head);
+    var body = el('div', 'as-ovb');
+    sh.appendChild(body);
+    ov.appendChild(sh);
+    ov.addEventListener('click', function (e) { if (e.target === ov) closeOv(o); });
+    win.appendChild(ov);
+    var o = { ov: ov, body: body, title: tt };
+    st.ui.sheets.push(o);
+    return o;
   }
-  // Liste « Mes prises » : reconstruite seulement si son contenu change
-  function renderTakeList(voice) {
-    var u = st.ui, list = voice ? takesOf(voice.id) : [];
-    var sig = st.booth.prevId + '|' + list.map(function (k) { return k.id + (isActive(k) ? '1' : '0'); }).join(',');
-    if (sig === u.tlSig) return;
-    u.tlSig = sig;
-    u.tl.innerHTML = '';
-    u.tlEmpty.hidden = list.length > 0;
-    list.forEach(function (tk) {
-      var on = isActive(tk), row = el('div', 'as-tlrow' + (on ? ' on' : '')), info = el('div', 'as-tlinfo');
-      info.appendChild(el('div', 'as-tln', 'Prise ' + tk.num));
-      info.appendChild(el('div', 'as-tlm', fmtDur(tk.buffer.duration) + ' · ' + clockOf(tk.at)));
-      row.appendChild(info);
-      cbtn(row, st.booth.prevId === tk.id ? 'pause' : 'play', 'Écouter', 'sm', function () { previewTake(tk); });
-      cbtn(row, 'metro', 'Recaler', 'sm', function () { openSync(syncSrcTake(tk)); });
-      if (on) row.appendChild(el('span', 'as-pill ok', 'Active'));
-      else cbtn(row, 'check', 'Utiliser', 'sm', function () { useTakeUI(tk); });
-      u.tl.appendChild(row);
+  function openOv(o) { o.ov.hidden = false; }
+  function closeOv(o) { o.ov.hidden = true; if (o === st.ui.shTake) st.booth.tkId = null; }
+  // Échap : ferme la feuille ouverte la plus récente ; renvoie vrai si une feuille était ouverte
+  function closeBoothOv() {
+    var list = st.ui.sheets || [];
+    for (var i = list.length - 1; i >= 0; i--) if (!list[i].ov.hidden) { closeOv(list[i]); renderBooth(); return true; }
+    return false;
+  }
+  function setSw(b, on) { b.classList.toggle('on', !!on); b.setAttribute('aria-checked', on ? 'true' : 'false'); }
+  function swRow(parent, title, sub, fn) {
+    var b = el('button', 'as-tsw');
+    b.type = 'button'; b.setAttribute('role', 'switch');
+    var tx = el('span', 'as-tsw-tx');
+    tx.appendChild(el('b', null, title)); tx.appendChild(el('small', null, sub));
+    b.appendChild(tx); b.appendChild(el('span', 'as-tog'));
+    b.addEventListener('click', function (e) { e.stopPropagation(); fn(); });
+    parent.appendChild(b);
+    return b;
+  }
+
+  function buildShNew(body) {
+    var u = st.ui;
+    body.appendChild(el('div', 'as-note-b', 'Choisis ton beat : l’instru sur laquelle tu chantes. Le tempo est détecté automatiquement.'));
+    cbtn(body, 'import', 'Importer un beat', 'xl', function () { u.bFileMode = 'new'; u.bFile.click(); });
+    cbtn(body, 'mic', 'Sans beat (a cappella)', 'xl', function () { createSound(null); });
+    cbtn(body, 'close', 'Annuler', '', function () { closeOv(u.shNew); });
+  }
+  // Ton casque : première fois (puis via les réglages). Filaire mis en avant.
+  function buildShHp(body) {
+    var u = st.ui;
+    body.appendChild(el('div', 'as-note-b', 'Le micro des casques Bluetooth donne un son faible et en retard sur iPhone. Préfère des écouteurs filaires sans micro.'));
+    var hps = el('div', 'as-hps');
+    HEADSET_ORDER.forEach(function (k) {
+      var h = HEADSETS[k], b = el('button', 'as-hp' + (h.mix ? ' as-hp-mix' : ''));
+      b.type = 'button';
+      b.innerHTML = h.mix ? '<span class="as-hp-ico">' + icon('headphones') + icon('phone') + '</span>' : icon(h.ic);
+      var tx = el('span', 'as-hp-tx');
+      if (k === 'wired') tx.appendChild(el('span', 'as-hp-badge', 'Recommandé'));
+      tx.appendChild(el('span', 'as-hp-t', h.t));
+      tx.appendChild(el('span', 'as-hp-s', h.s));
+      b.appendChild(tx);
+      b.setAttribute('aria-pressed', 'false');
+      b.addEventListener('click', function () { boothSetHeadset(k); });
+      u.hp[k] = b; hps.appendChild(b);
+    });
+    body.appendChild(hps);
+    u.btNote = el('div', 'as-note-b', 'Le micro du casque Bluetooth enregistre en qualité réduite ; si possible, chante dans le micro de l’iPhone.');
+    u.noneNote = el('div', 'as-note-b', 'Sans casque, l’instru sort des haut-parleurs et sera captée par le micro : elle se retrouvera dans ta prise. Le retour micro est coupé.');
+    u.btmixNote = el('div', 'as-note-b', 'L’instru sort dans ton casque Bluetooth, et ta voix est captée par le micro de l’iPhone. Safari ne garantit pas cette combinaison : lance le test pour vérifier.');
+    body.appendChild(u.btNote); body.appendChild(u.noneNote); body.appendChild(u.btmixNote);
+    u.tBtn = cbtn(body, 'test', 'Tester mon casque et mon micro', 'xl', guideStart);
+    u.guide = el('div', 'as-guide'); u.guide.hidden = true;
+    u.gMic = el('div', 'as-gmic', ''); u.gMsg = el('div', 'as-gmsg', '');
+    u.gMsg.setAttribute('role', 'status'); u.gMsg.setAttribute('aria-live', 'polite');
+    u.gLog = el('div', 'as-glog');
+    u.gAsk = el('div', 'as-gask');
+    u.gAsk.appendChild(el('div', 'as-gq', 'Tu entends le son dans ton casque ?'));
+    var gaRow = el('div', 'as-gopts');
+    cbtn(gaRow, 'check', 'Oui', 'keep', function () { guideAnswer('yes'); });
+    cbtn(gaRow, 'speaker', 'Non, il sort du haut-parleur', '', function () { guideAnswer('speaker'); });
+    cbtn(gaRow, 'close', 'Non, rien', '', function () { guideAnswer('nothing'); });
+    u.gAsk.appendChild(gaRow);
+    u.gHelp = el('div', 'as-ghelp'); u.gHelp.hidden = true;
+    u.gHelp.appendChild(el('div', 'as-note-b', 'Solutions : 1) écouteurs filaires (adaptateur Lightning ou USB-C), 2) casque Bluetooth seul (micro du casque, qualité réduite), 3) sans casque avec l’anti-écho.'));
+    var ghRow = el('div', 'as-gopts');
+    cbtn(ghRow, 'headphones', 'Écouteurs filaires', '', function () { boothSetHeadset('wired'); });
+    cbtn(ghRow, 'bt', 'Casque Bluetooth seul', '', function () { boothSetHeadset('bt'); });
+    cbtn(ghRow, 'speaker', 'Sans casque', '', function () { boothSetHeadset('none'); });
+    u.gHelp.appendChild(ghRow);
+    u.gDone = el('div', 'as-gopts'); u.gDone.hidden = true;
+    cbtn(u.gDone, 'close', 'Fermer le test', 'keep', guideClose);
+    u.gRetry = cbtn(null, 'retry', 'Recommencer le test', '', guideStart);
+    u.gRetry.hidden = true;
+    u.guide.appendChild(u.gMic); u.guide.appendChild(u.gMsg); u.guide.appendChild(u.gLog);
+    u.guide.appendChild(u.gAsk); u.guide.appendChild(u.gHelp); u.guide.appendChild(u.gDone); u.guide.appendChild(u.gRetry);
+    body.appendChild(u.guide);
+    var fine = el('button', 'as-link', 'Réglages fins (latence, calibrage, micro)');
+    fine.type = 'button';
+    fine.addEventListener('click', function () { closeHpSheet(); toggleSheet(true); });
+    body.appendChild(fine);
+    cbtn(body, 'check', 'Terminer', 'keep', closeHpSheet);
+  }
+  // Ta prise : écoute, « Sur le temps », « Réduire le bruit », équilibre, décalage, prises, garder / refaire
+  function buildShTake(body) {
+    var u = st.ui;
+    u.tkTitle = el('div', 'as-takec-h', '');
+    body.appendChild(u.tkTitle);
+    u.tkWave = el('canvas', 'as-tk-cv');
+    body.appendChild(u.tkWave);
+    u.tkPlay = cbtn(body, 'play', 'Écouter (voix + beat)', 'xl', function () {
+      var tk = takeById(st.booth.tkId); if (!tk) return;
+      if (st.playing) pause(); else boothListen(tk);
+    });
+    u.tkSync = swRow(body, 'Sur le temps', 'Aligne les attaques de la voix sur la grille (1/8, force 70 %).', function () {
+      var tk = takeById(st.booth.tkId);
+      if (!tk || st.booth.fxBusy || st.recording) return;
+      var fx = takeFx(tk);
+      if (!fx.sync && !instruTrack()) { setStatus('Pas d’instru : la grille part de 0 s du projet.'); }
+      setTakeFx(tk, { den: fx.den, sync: !fx.sync }, fx.sync ? 'Sur le temps désactivé' : 'Sur le temps');
+    });
+    var adv = el('div', 'as-tadv');
+    u.tkAdv = el('button', 'as-link', 'Réglages avancés du recalage');
+    u.tkAdv.type = 'button';
+    u.tkAdv.addEventListener('click', function () {
+      var tk = takeById(st.booth.tkId); if (!tk) return;
+      closeOv(u.shTake); openSync(syncSrcTake(tk));
+    });
+    adv.appendChild(u.tkAdv); body.appendChild(adv);
+    u.tkDen = swRow(body, 'Réduire le bruit', 'Coupe le souffle entre les syllabes. Non destructif : la prise d’origine est gardée.', function () {
+      var tk = takeById(st.booth.tkId);
+      if (!tk || st.booth.fxBusy || st.recording) return;
+      var fx = takeFx(tk);
+      setTakeFx(tk, { den: !fx.den, sync: fx.sync }, fx.den ? 'Réduction du bruit désactivée' : 'Réduction du bruit');
+    });
+    u.tkNote = el('div', 'as-takec-sum', '');
+    body.appendChild(u.tkNote);
+    // Voix ↔ Beat
+    var bal = el('div', 'as-tbal');
+    var bH = el('div', 'as-tbal-h');
+    bH.appendChild(el('span', 'as-lbl', 'Voix ↔ Beat'));
+    u.tkBalV = el('span', 'as-mval', '');
+    bH.appendChild(u.tkBalV);
+    bal.appendChild(bH);
+    u.tkBal = inp('range', 'as-br');
+    u.tkBal.min = 0; u.tkBal.max = 100; u.tkBal.step = 1;
+    u.tkBal.setAttribute('aria-label', 'Équilibre entre la voix et le beat');
+    u.tkBal.addEventListener('input', function () { applyBalance(+u.tkBal.value); u.tkBalV.textContent = balText(); });
+    u.tkBal.addEventListener('change', function () { pushHistory('Équilibre voix / beat'); });
+    bal.appendChild(u.tkBal);
+    body.appendChild(bal);
+    // Décalage ± 10 ms
+    var nd = el('div', 'as-tnudge');
+    nd.appendChild(el('span', 'as-lbl', 'Décalage'));
+    cbtn(nd, 'minus', '−10 ms', 'sm', function () { bumpNudge(-10); });
+    u.tkNudgeV = el('span', 'as-mval', '0 ms');
+    nd.appendChild(u.tkNudgeV);
+    cbtn(nd, 'plus', '+10 ms', 'sm', function () { bumpNudge(10); });
+    body.appendChild(nd);
+    // Prises de la piste
+    body.appendChild(el('div', 'as-sub', 'Prises de cette piste'));
+    u.tkChips = el('div', 'as-tchips');
+    body.appendChild(u.tkChips);
+    // Pied : garder, refaire, supprimer
+    var foot = el('div', 'as-row2');
+    cbtn(foot, 'retry', 'Refaire', '', function () {
+      var tk = takeById(st.booth.tkId); if (!tk || st.recording) return;
+      closeTakeSheet(); boothRedo(tk);
+    });
+    cbtn(foot, 'check', 'Garder', 'keep', function () {
+      var tk = takeById(st.booth.tkId); if (!tk) return;
+      closeTakeSheet(); markDirty(); setStatus('Prise ' + tk.num + ' gardée.'); renderBooth();
+    });
+    cbtn(foot, 'trash', 'Supprimer', 'danger', function () {
+      var tk = takeById(st.booth.tkId); if (!tk || st.recording) return;
+      closeTakeSheet(); boothDelete(tk);
+    });
+    body.appendChild(foot);
+  }
+  function buildShExp(body) {
+    var u = st.ui;
+    body.appendChild(el('div', 'as-note', 'Fichiers WAV, 44,1 kHz, 16 bits. Le nom du fichier reprend le nom du son.'));
+    cbtn(body, 'export', 'Morceau complet', 'xl', function () { closeOv(u.shExp); exportMix(); });
+    cbtn(body, 'mic', 'Voix seule', 'xl', function () { closeOv(u.shExp); exportVoice(); });
+    cbtn(body, 'bus', 'Pistes séparées (.zip)', 'xl', function () { closeOv(u.shExp); exportStems(); });
+  }
+  function buildShMenu(body) {
+    var u = st.ui;
+    cbtn(body, 'edit', 'Renommer', 'xl', function () { var id = u.menuId; closeOv(u.shMenu); openRename(id); });
+    cbtn(body, 'dup', 'Dupliquer', 'xl', function () { var id = u.menuId; closeOv(u.shMenu); duplicateProject(id); });
+    cbtn(body, 'export', 'Exporter', 'xl', function () { var id = u.menuId; closeOv(u.shMenu); openExportFor(id); });
+    cbtn(body, 'trash', 'Supprimer', 'xl danger', function () { var id = u.menuId; closeOv(u.shMenu); openDelete(id); });
+  }
+  function buildShRen(body) {
+    var u = st.ui;
+    u.renIn = inp('text', 'as-st-nin');
+    u.renIn.maxLength = 60;
+    u.renIn.setAttribute('aria-label', 'Nouveau nom du son');
+    u.renIn.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); renOk(); } });
+    body.appendChild(u.renIn);
+    var r = el('div', 'as-row2');
+    cbtn(r, 'check', 'Enregistrer', 'keep lg', renOk);
+    cbtn(r, 'close', 'Annuler', 'lg', function () { closeOv(u.shRen); });
+    body.appendChild(r);
+  }
+  function buildShDel(body) {
+    var u = st.ui;
+    u.delTxt = el('div', 'as-note-b', '');
+    body.appendChild(u.delTxt);
+    var r = el('div', 'as-row2');
+    cbtn(r, 'trash', 'Supprimer définitivement', 'danger lg', function () { var id = u.menuId; closeOv(u.shDel); deleteProject(id); });
+    cbtn(r, 'close', 'Annuler', 'lg', function () { closeOv(u.shDel); });
+    body.appendChild(r);
+  }
+
+  // ---------- Rendu de la Cabine ----------
+  function fmtShort(ms) { var d = new Date(ms); return pad(d.getDate(), 2) + '/' + pad(d.getMonth() + 1, 2) + ' ' + pad(d.getHours(), 2) + ':' + pad(d.getMinutes(), 2); }
+  // Vignette dégradée générée à partir du nom
+  function thumbGrad(name) {
+    var h = 0, s = String(name || ''), i;
+    for (i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 100003;
+    h = (h * 47 + s.length * 23) % 360;
+    return 'linear-gradient(135deg,hsl(' + h + ',90%,62%),hsl(' + ((h + 70) % 360) + ',85%,46%))';
+  }
+  function findMeta(id) {
+    var l = st.sess.index ? st.sess.index.list : [];
+    for (var i = 0; i < l.length; i++) if (l[i].id === id) return l[i];
+    return null;
+  }
+  function renderLib() {
+    var u = st.ui, list = st.sess.index ? st.sess.index.list : [];
+    var sig = st.projId + '|' + list.map(function (p) { return [p.id, p.name, p.at, p.dur, p.nt].join('~'); }).join('|');
+    if (sig === u.libSig) return;
+    u.libSig = sig;
+    u.libList.innerHTML = '';
+    u.libCount.textContent = list.length ? list.length + ' son' + (list.length > 1 ? 's' : '') : '';
+    u.libEmpty.hidden = list.length > 0;
+    list.slice().sort(function (a, b) { return b.at - a.at; }).forEach(function (p) {
+      var row = el('div', 'as-lib-row' + (p.id === st.projId ? ' on' : ''));
+      var th = el('button', 'as-lib-th'); th.type = 'button';
+      th.style.background = thumbGrad(p.name);
+      th.appendChild(el('span', 'as-lib-thl', (String(p.name || '?').trim().charAt(0) || '?').toUpperCase()));
+      th.setAttribute('aria-label', 'Ouvrir ' + p.name);
+      th.addEventListener('click', function () { openProject(p.id, null); });
+      var info = el('button', 'as-lib-info'); info.type = 'button';
+      info.appendChild(el('span', 'as-lib-nm', p.name));
+      info.appendChild(el('span', 'as-lib-mt', fmtShort(p.at) + ' · ' + fmtDur(p.dur) + ' · ' + p.nt + ' prise' + (p.nt > 1 ? 's' : '')));
+      info.addEventListener('click', function () { openProject(p.id, null); });
+      var more = el('button', 'as-lib-more'); more.type = 'button';
+      more.innerHTML = icon('more');
+      more.setAttribute('aria-label', 'Actions pour ' + p.name);
+      more.addEventListener('click', function (e) { e.stopPropagation(); openProjMenu(p.id); });
+      row.appendChild(th); row.appendChild(info); row.appendChild(more);
+      u.libList.appendChild(row);
     });
   }
-  function renderBooth() {
-    var u = st.ui;
-    if (!u.boothWin) return;
-    var b = st.booth, voice = voiceTrack(), instru = instruTrack(), ic = instru ? firstClipOf(instru) : null;
-    u.iEmpty.hidden = !!ic; u.iFull.hidden = !ic;
-    u.acapNote.hidden = !b.acap;
-    if (ic) {
-      u.iName.textContent = ic.name;
-      u.iMeta.textContent = fmtDur(ic.buffer.duration);
-      if (u.miniFor !== ic.buffer) { u.miniFor = ic.buffer; drawMini(u.mini, ic.buffer); }
-      setIcon(u.iPlay, st.playing ? 'pause' : 'play');
-      u.iPlay._lbl.textContent = st.playing ? 'Pause' : 'Écouter';
-    }
-    syncVol(u.iVol, instru);
+  function renderStudio() {
+    var u = st.ui, b = st.booth, voice = voiceTrack(), instru = instruTrack(), ic = instru ? firstClipOf(instru) : null;
+    var rec = st.recording, hasLyr = lyrHas(), lt = takeById(b.lastId);
+    if (u.stNameIn.hidden) u.stName.textContent = st.pname || 'Sans titre';
+    u.bandName.textContent = ic ? ic.name : 'Sans beat (a cappella)';
+    u.bandChg._lbl.textContent = ic ? 'Changer le beat' : 'Ajouter un beat';
+    u.bandWv.hidden = !ic;
+    u.bandDur = ic ? ic.duration : 0; u.bandStart = ic ? ic.start : 0;
+    if (ic && u.bandFor !== ic.buffer) { u.bandFor = ic.buffer; drawMini(u.bandWave, ic.buffer); }
+    if (document.activeElement !== u.bpmIn) u.bpmIn.value = st.bpm;
+    u.bandVol.disabled = !instru;
+    if (document.activeElement !== u.bandVol) u.bandVol.value = pctOf(instru);
+    u.bandVolV.textContent = pctOf(instru) + ' %';
+    u.zone.hidden = rec;
+    var showWave = !!lt && !hasLyr;
+    u.zoneEmpty.hidden = showWave || hasLyr;
+    u.recWrap.hidden = !showWave;
+    if (showWave && u.zoneFor !== lt.buffer) { u.zoneFor = lt.buffer; drawMini(u.recWrap, lt.buffer); }
+    if (!showWave) u.zoneFor = null;
+    var cur = presetOf(voice);
+    Object.keys(u.tiles).forEach(function (k) {
+      var on = cur === k;
+      u.tiles[k].classList.toggle('on', on);
+      u.tiles[k].setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    setSw(u.count, b.count);
+    u.recRow.hidden = rec;
+    u.recLive.hidden = !rec;
+    u.stuV.classList.toggle('as-onair-on', rec);
+    u.recMic.hidden = !rec;
+    u.recMic.textContent = 'Micro : ' + (rx.micName || 'non précisé');
+    u.recMic.className = 'as-micl' + (rx.micState === 'ok' ? ' ok' : (rx.micState === 'warn' ? ' warn' : ''));
+    u.recBtn.disabled = st.recPending;
+    u.recLbl.textContent = st.recPending ? 'Ouverture du micro…' : 'Enregistrer';
+    renderLyrics();
+    renderPanel(rec, hasLyr);
+    lyrWake(rec || st.lyr.preview || (st.playing && hasLyr));
+  }
+  function renderHpSheet() {
+    var u = st.ui, b = st.booth;
     Object.keys(u.hp).forEach(function (k) {
       var on = b.hp === k;
       u.hp[k].classList.toggle('on', on);
@@ -9364,33 +9643,333 @@ select.ie-in{width:auto}
     u.btmixNote.hidden = b.hp !== 'btmix';
     u.tBtn.hidden = !b.hp;
     u.guide.hidden = !rx.guide;
-    var mp = micPill();
-    setPill(u.bMic, mp[0], mp[1]);
-    setPill(u.bHp, b.hp ? 'ok' : '', b.hp ? HEADSETS[b.hp].t : 'Casque : à choisir');
-    var rec = st.recording;
-    u.recIdle.hidden = rec; u.recLive.hidden = !rec;
-    u.recMic.hidden = !rec;
-    u.recMic.textContent = 'Micro : ' + (rx.micName || 'non précisé');
-    u.recMic.className = 'as-micl' + (rx.micState === 'ok' ? ' ok' : (rx.micState === 'warn' ? ' warn' : ''));
-    u.step3.classList.toggle('as-onair', rec);
-    u.recBtn.disabled = st.recPending || st.sess.pending;
-    u.recLbl.textContent = st.recPending ? 'Ouverture du micro…' : (st.sess.pending ? 'Session à trancher' : 'Enregistrer');
-    u.count.classList.toggle('on', b.count);
-    u.count.setAttribute('aria-checked', b.count ? 'true' : 'false');
-    u.startZero.classList.toggle('on', b.start === 'zero');
-    u.startHere.classList.toggle('on', b.start !== 'zero');
-    if (document.activeElement !== u.bpm) u.bpm.value = st.bpm;
-    var hasLyr = lyrHas();
-    renderLyrics();
-    renderPanel(rec, hasLyr);
-    lyrWake(rec || st.lyr.preview || (st.playing && hasLyr));
-    renderTakeCard();
-    renderTakeList(voice);
-    var pr = presetOf(voice);
-    Object.keys(u.presets).forEach(function (k) { u.presets[k].classList.toggle('on', pr === k); });
-    syncVol(u.fVoice, voice);
-    syncVol(u.fInst, instru);
   }
+  // Feuille « Ta prise » : mise à jour seulement quand elle est ouverte
+  function renderTakeSheet() {
+    var u = st.ui;
+    if (!u.shTake || u.shTake.ov.hidden) return;
+    var tk = takeById(st.booth.tkId);
+    if (!tk || st.recording) { closeOv(u.shTake); return; }
+    var fx = takeFx(tk), act = isActive(tk), busy = st.booth.fxBusy;
+    u.tkTitle.textContent = 'Prise ' + tk.num + ' · ' + fmtDur(tk.buffer.duration);
+    if (u.tkFor !== tk.buffer) { u.tkFor = tk.buffer; drawMini(u.tkWave, tk.buffer); }
+    setSw(u.tkSync, fx.sync); setSw(u.tkDen, fx.den);
+    u.tkSync.disabled = busy; u.tkDen.disabled = busy;
+    u.tkPlay.disabled = !act;
+    setIcon(u.tkPlay, st.playing ? 'pause' : 'play');
+    u.tkPlay._lbl.textContent = st.playing ? 'Pause' : 'Écouter (voix + beat)';
+    var nz = varCache.get(tk.id + '|nz');
+    u.tkNote.textContent = busy ? 'Calcul en cours…'
+      : (fx.den && nz ? (nz.noiseDb <= -100 ? 'Silence numérique : rien à réduire.' : 'Bruit de fond estimé : ' + fr1(nz.noiseDb, 0) + ' dB ; réduction moyenne entre les syllabes : ' + fr1(nz.cut, 1) + ' dB.') : '');
+    u.tkBal.value = st.booth.bal;
+    u.tkBalV.textContent = balText();
+    u.tkNudgeV.textContent = msText(tk.nudge || 0);
+    var list = takesOf(tk.trackId), sig = list.map(function (k) { return k.id + (isActive(k) ? '1' : '0'); }).join(',');
+    if (sig !== u.tkChipSig) {
+      u.tkChipSig = sig;
+      u.tkChips.innerHTML = '';
+      list.forEach(function (k) {
+        var c = pchip(u.tkChips, 'Prise ' + k.num + (isActive(k) ? ' · active' : ''), function () { selTake(k); });
+        c.classList.toggle('on', k.id === tk.id);
+        c.setAttribute('aria-pressed', k.id === tk.id ? 'true' : 'false');
+      });
+    }
+  }
+  function renderBooth() {
+    var u = st.ui;
+    if (!u.boothWin) return;
+    if (u.wrap) u.wrap.dataset.pro = st.pro ? '1' : '';
+    if (!st.projId) st.bview = 'lib';
+    var lib = st.bview !== 'studio';
+    u.libV.hidden = !lib;
+    u.stuV.hidden = lib;
+    var host = lib ? u.libV : u.stuV;
+    if (u.bStatus.parentNode !== host) host.appendChild(u.bStatus);
+    if (lib) renderLib(); else renderStudio();
+    setPill(u.bHp, st.booth.hp ? 'ok' : '', st.booth.hp ? HEADSETS[st.booth.hp].t : 'Casque : à choisir');
+    renderHpSheet();
+    renderTakeSheet();
+  }
+
+  // ---------- Variantes d'une prise : réduction du bruit (hors ligne) et recalage (moteur existant) ----------
+  function takeRaw(tk) { return tk.raw || tk.buffer; }
+  function takeFx(tk) { return tk.fx || { den: false, sync: false }; }
+  // Passe-haut 80 Hz, puis expandeur doux 1:3 sous le seuil (bruit de fond + 6 dB) ; enveloppe 5 ms / 80 ms
+  function denoiseBuffer(src) {
+    var sr = src.sampleRate, n = src.length, nch = src.numberOfChannels, c, i, k, q;
+    var chans = [], m = new Float32Array(n);
+    for (c = 0; c < nch; c++) chans.push(src.getChannelData(c));
+    for (i = 0; i < n; i++) { var s = 0; for (c = 0; c < nch; c++) s += chans[c][i]; m[i] = s / nch; }
+    var w0 = 2 * Math.PI * 80 / sr, cw = Math.cos(w0), al = Math.sin(w0) / (2 * 0.7071);
+    var a0 = 1 + al, B0 = (1 + cw) / 2 / a0, B1 = -(1 + cw) / a0, B2 = B0, A1 = -2 * cw / a0, A2 = (1 - al) / a0;
+    function hp(x) {
+      var y = new Float32Array(x.length), x1 = 0, x2 = 0, y1 = 0, y2 = 0, xi, yi;
+      for (var j = 0; j < x.length; j++) {
+        xi = x[j];
+        yi = B0 * xi + B1 * x1 + B2 * x2 - A1 * y1 - A2 * y2;
+        y[j] = yi; x2 = x1; x1 = xi; y2 = y1; y1 = yi;
+      }
+      return y;
+    }
+    var hm = hp(m), hc = [];
+    for (c = 0; c < nch; c++) hc.push(hp(chans[c]));
+    // Bruit de fond : 10e centile des niveaux RMS (fenêtres de 20 ms), en dB
+    var W = Math.max(1, Math.round(0.02 * sr)), nW = Math.floor(n / W), db = [];
+    for (k = 0; k < nW; k++) {
+      var acc = 0;
+      for (i = k * W; i < (k + 1) * W; i++) acc += hm[i] * hm[i];
+      db.push(10 * Math.log10(acc / W + 1e-12));
+    }
+    var sorted = db.slice().sort(function (a, b) { return a - b; });
+    var noiseDb = nW ? sorted[Math.floor(0.1 * (nW - 1))] : -120, thr = noiseDb + 6;
+    // Niveau : moyenne de puissance sur 5 ms (symétrique, sans biais) ; gain : ouverture 5 ms, fermeture 80 ms
+    var aA = Math.exp(-1 / (0.005 * sr)), aR = Math.exp(-1 / (0.08 * sr)), pav = 0, gs = 1, cutSum = 0, cutN = 0;
+    var outs = [];
+    for (c = 0; c < nch; c++) outs.push(new Float32Array(n));
+    for (i = 0; i < n; i++) {
+      pav = aA * pav + (1 - aA) * hm[i] * hm[i];
+      var ed = 10 * Math.log10(pav + 1e-12), tg = 1;
+      if (ed < thr) {
+        var gd = Math.max(-30, 2 * (ed - thr));
+        tg = Math.pow(10, gd / 20);
+        cutSum += -gd; cutN++;
+      }
+      gs = tg > gs ? aA * gs + (1 - aA) * tg : aR * gs + (1 - aR) * tg;
+      for (q = 0; q < nch; q++) outs[q][i] = hc[q][i] * gs;
+    }
+    var out = getCtx().createBuffer(nch, n, sr);
+    for (c = 0; c < nch; c++) out.copyToChannel(outs[c], c);
+    return { buf: out, noiseDb: Math.round(noiseDb * 10) / 10, cut: cutN ? Math.round(cutSum / cutN * 10) / 10 : 0 };
+  }
+  // Recalage sur le temps : moteur existant (grille 1/8, force 70 %), résultat renvoyé par rappel
+  function syncVariant(buf, tk, cb) {
+    SY.grid = '1/8'; SY.force = 70; SY.swing = 0;
+    var src = { take: null, clip: null, name: 'Prise ' + tk.num, buffer: buf, trackId: tk.trackId, start: tk.base,
+      offset: 0, duration: buf.duration, fadeIn: 0, fadeOut: 0, gainDb: 0, curve: st.curve };
+    SY.hook = function () { var out = SY.out ? SY.out.buf : null; closeSync(); cb(out); };
+    openSync(src, true);
+    if (!SY.open) { SY.hook = null; cb(null); }
+  }
+  // Renvoie la variante demandée (cb reçoit le buffer, ou null si impossible)
+  function variantFor(tk, fx, cb) {
+    var base = takeRaw(tk), kd = tk.id + '|d';
+    if (fx.den) {
+      if (!varCache.has(kd)) {
+        var r = denoiseBuffer(takeRaw(tk));
+        varCache.set(kd, r.buf);
+        varCache.set(tk.id + '|nz', { noiseDb: r.noiseDb, cut: r.cut });
+      }
+      base = varCache.get(kd);
+    }
+    if (!fx.sync) { cb(base); return; }
+    var ks = tk.id + '|s' + (fx.den ? 1 : 0);
+    if (varCache.has(ks)) { cb(varCache.get(ks)); return; }
+    syncVariant(base, tk, function (buf) { if (buf) varCache.set(ks, buf); cb(buf); });
+  }
+  // Remplace le buffer de la prise (la prise active est reconstruite, les autres restent en réserve)
+  function applyTakeBuffer(tk, buf, fx) {
+    var act = isActive(tk);
+    if (act) parkTake(tk.id);
+    tk.buffer = buf; tk.duration = buf.duration; tk.offset = 0;
+    tk.start = Math.max(0, tk.base + (tk.nudge || 0) / 1000);
+    tk.fx = { den: !!fx.den, sync: !!fx.sync };
+    if (act) useTake(tk);
+  }
+  function setTakeFx(tk, fx, label) {
+    var tok = ++fxTok;
+    st.booth.fxBusy = true; renderBooth();
+    variantFor(tk, fx, function (buf) {
+      if (tok !== fxTok) return;
+      st.booth.fxBusy = false;
+      if (!takeById(tk.id)) { renderBooth(); return; }
+      if (!buf) { setStatus('Recalage impossible : rien n’a été changé (prise trop courte ou enregistrement en cours).', true); renderBooth(); return; }
+      applyTakeBuffer(tk, buf, fx);
+      edited(label);
+      var nz = varCache.get(tk.id + '|nz');
+      setStatus(label + (fx.den && nz ? ' : bruit réduit (' + fr1(nz.cut, 1) + ' dB entre les syllabes).' : (fx.sync ? ' : prise alignée sur la grille.' : ' : prise d’origine rétablie.')));
+    });
+  }
+
+  // ---------- Feuille « Ta prise » : ouverture, décalage, équilibre, sélection ----------
+  function openTakeSheet(tk) {
+    var u = st.ui;
+    if (!u.shTake || st.tab !== 'booth' || st.bview !== 'studio') return;
+    st.booth.tkId = tk.id; u.tkFor = null; u.tkChipSig = null;
+    openOv(u.shTake);
+    if (st.booth.autoSync && !takeFx(tk).sync) {
+      setTakeFx(tk, { den: takeFx(tk).den, sync: true }, 'Sur le temps (automatique)');
+    }
+    renderBooth();
+  }
+  function closeTakeSheet() { closeOv(st.ui.shTake); renderBooth(); }
+  function selTake(k) {
+    if (st.recording || st.recPending) return;
+    if (!isActive(k)) useTakeUI(k);
+    st.booth.tkId = k.id; st.ui.tkFor = null;
+    renderBooth();
+  }
+  function bumpNudge(d) {
+    var tk = takeById(st.booth.tkId);
+    if (!tk || st.recording) return;
+    var n = clamp((tk.nudge || 0) + d, -200, 200);
+    tk.nudge = n;
+    tk.start = Math.max(0, tk.base + n / 1000);
+    var c = clipOfTake(tk);
+    if (c) c.start = tk.start;
+    edited('Décalage de la prise ' + tk.num + ' (' + msText(n) + ')');
+  }
+  // Équilibre : 50 = égal ; au-delà, la voix passe au plus à 0 dB et le beat baisse de 6 dB (et inversement)
+  function applyBalance(v) {
+    st.booth.bal = clamp(Math.round(v), 0, 100);
+    var dv = (st.booth.bal - 50) / 50 * 6, vt = voiceTrack(), it = instruTrack();
+    if (vt) vt.db = Math.min(0, dv);
+    if (it) it.db = Math.min(0, -dv);
+    applyMixLive();
+  }
+  function balText() {
+    var v = st.booth.bal;
+    return v === 50 ? 'Équilibré' : (v > 50 ? 'Voix en avant' : 'Beat en avant');
+  }
+
+  // ---------- Tempo détecté à l'import (moteur de recalage) ----------
+  function detectBpm(buf) {
+    var L = buf.getChannelData(0), n = Math.min(L.length, Math.round(buf.sampleRate * 120));
+    var msg = { ch: [L.slice(0, n)], sr: buf.sampleRate, bpm: 0 };
+    syncRun('bpm', 'instru', msg, [msg.ch[0].buffer], 'Détection du tempo…', function (r) {
+      if (!r || !r.bpm) return;
+      st.bpm = clamp(Math.round(r.bpm), 20, 300);
+      markDirty(); renderAll();
+      setStatus('Tempo détecté : ' + st.bpm + ' BPM (tu peux le modifier).');
+    });
+  }
+
+  // ---------- Casque (premier choix) et mode pro ----------
+  function openHpSheet(then) {
+    st.ui.shHpThen = then || null;
+    openOv(st.ui.shHp);
+    renderBooth();
+  }
+  function closeHpSheet() {
+    closeOv(st.ui.shHp);
+    var f = st.ui.shHpThen; st.ui.shHpThen = null;
+    renderBooth();
+    if (f) f();
+  }
+  function loadPro() { try { return window.localStorage.getItem(PRO_KEY) === '1'; } catch (e) { return false; } }
+  function togglePro() {
+    st.pro = !st.pro;
+    try { window.localStorage.setItem(PRO_KEY, st.pro ? '1' : '0'); } catch (e) { /* stockage indisponible */ }
+    renderAll();
+  }
+  function openLyrics() { openOv(st.ui.shLyr); renderBooth(); }
+  function openExport() {
+    if (projectEnd() <= 0) { setStatus('Rien à exporter : ajoute un beat ou enregistre une prise.', true); return; }
+    openOv(st.ui.shExp); renderBooth();
+  }
+  function openExportFor(id) {
+    if (id === st.projId) openExport(); else openProject(id, openExport);
+  }
+  function fileBase() {
+    return String(st.pname || 'mixage').replace(/[\\\/:*?"<>|\x00-\x1f]/g, '_').trim().slice(0, 60) || 'mixage';
+  }
+  function exportVoice() {
+    if (st.exporting) return;
+    var t = voiceTrack(), end = projectEnd();
+    if (!t || !clipsOf(t.id).length) { setStatus('Aucune prise de voix à exporter.', true); return; }
+    var sr = +st.exp.sr, bits = +st.exp.bits;
+    st.exporting = true;
+    setStatus('Rendu de la voix…');
+    renderTrackOnly(t, end, sr, !!st.exp.master).then(function (buf) {
+      st.exporting = false;
+      var name = fileBase() + ' - voix.wav';
+      return (window.sfSave ? window.sfSave(name, encodeWav(buf, bits)) : Promise.resolve('Téléchargement indisponible.'))
+        .then(function (msg) { setStatus(msg || ('Voix exportée : ' + name + '.')); });
+    }).catch(function (err) {
+      st.exporting = false;
+      setStatus('Export de la voix échoué : ' + ((err && err.message) || err), true);
+    });
+  }
+
+  // ---------- Préréglages voix, présélection courante ----------
+  function presetOf(t) {
+    if (!t) return 'naturel';
+    if (t.preset) return t.preset;
+    var ty = t.inserts.filter(Boolean).map(function (i) { return i.type; });
+    if (!ty.length) return 'naturel';
+    if (ty.indexOf('reverb') >= 0) return 'echo';
+    if (ty.indexOf('dist') >= 0) return 'radio';
+    if (ty.indexOf('eq') >= 0) return 'studio';
+    return 'naturel';
+  }
+  function applyPreset(name) {
+    var v = voiceTrack() || addTrack('Voix');
+    var P = null, i;
+    for (i = 0; i < VPRESETS.length; i++) if (VPRESETS[i][0] === name) P = VPRESETS[i];
+    var list = P ? P[3] : [];
+    v.inserts = [0, 1, 2, 3].map(function (k) { var p = list[k]; return p ? { type: p.type, params: cloneP(p.params) } : null; });
+    if (name === 'dbl') v.pan = -12;
+    else if (v.preset === 'dbl') v.pan = 0;
+    v.preset = P ? P[0] : 'naturel';
+    st.insSel = null;
+    edited('Effet voix : ' + (P ? P[1] : 'Naturel'));
+  }
+
+  // ---------- Studio : nom, Enregistrement (garde-fous) ----------
+  function startStRename() {
+    var u = st.ui;
+    u.stNameIn.value = st.pname || '';
+    u.stNameIn.hidden = false; u.stName.hidden = true;
+    u.stNameIn.focus(); u.stNameIn.select();
+  }
+  function commitStRename() {
+    var u = st.ui;
+    if (!u.stNameIn || u.stNameIn.hidden) return;
+    var v = u.stNameIn.value.trim().slice(0, 60);
+    u.stNameIn.hidden = true; u.stName.hidden = false;
+    if (v && v !== st.pname) { st.pname = v; saveNow(); }
+    renderBooth();
+  }
+  function openRename(id) {
+    var m = findMeta(id), u = st.ui;
+    if (!m) return;
+    u.menuId = id;
+    u.renIn.value = m.name;
+    openOv(u.shRen);
+    renderBooth();
+  }
+  function openDelete(id) {
+    var m = findMeta(id), u = st.ui;
+    if (!m) return;
+    u.menuId = id;
+    u.delTxt.textContent = 'Supprimer « ' + m.name + ' » ? Les pistes, les prises et les paroles sont effacées. Cette action est irréversible.';
+    openOv(u.shDel);
+    renderBooth();
+  }
+  function openProjMenu(id) {
+    var m = findMeta(id), u = st.ui;
+    if (!m) return;
+    u.menuId = id;
+    u.shMenu.title.textContent = m.name;
+    openOv(u.shMenu);
+    renderBooth();
+  }
+  function renOk() {
+    var u = st.ui, id = u.menuId;
+    closeOv(u.shRen);
+    renameProject(id, u.renIn.value);
+  }
+
+  // Nouveau son : ouvre la feuille de choix du beat
+  function openNewSound() { openOv(st.ui.shNew); renderBooth(); }
+
+  // Vue de la Cabine : bibliothèque ou Studio
+  function showLib() {
+    if (st.recording || st.recPending) { setStatus('Termine l’enregistrement avant de quitter le Studio.', true); return; }
+    st.bview = 'lib';
+    saveNow();
+    renderBooth();
+  }
+
   // Mini forme d'onde de l'instru (étape 1)
   function drawMini(cv, buf) {
     var W = Math.max(2, Math.round(cv.clientWidth)), H = 56, mid = H / 2;
@@ -9432,9 +10011,11 @@ select.ie-in{width:auto}
   // Mise à jour rapide pendant l'affichage de la Cabine (chaque image)
   function boothTick() {
     var u = st.ui;
-    if (!u.boothWin) return;
+    if (!u.boothWin || st.bview !== 'studio') return;
     var c = st.ctx, now = c ? c.currentTime : 0;
-    u.bTime.textContent = fmtTime(c && st.playing ? currentPos() : st.playhead, false);
+    var pos = c && st.playing ? currentPos() : st.playhead;
+    u.bandTime.textContent = fmtTime(pos, false);
+    if (u.bandDur > 0) u.bandPos.style.left = (clamp((pos - u.bandStart) / u.bandDur, 0, 1) * 100).toFixed(2) + '%';
     lyrTick();
     var lv = 0;
     if (rx.stream && rx.an && rx.buf) {
@@ -9443,7 +10024,7 @@ select.ie-in{width:auto}
       for (i = 0; i < rx.buf.length; i++) { var a = rx.buf[i] < 0 ? -rx.buf[i] : rx.buf[i]; if (a > pk) pk = a; }
       lv = pk > 0 ? clamp((20 * Math.log10(pk) + 60) / 60, 0, 1) : 0;
     }
-    u.recWrap.style.setProperty('--lvl', lv.toFixed(3));
+    u.recBox.style.setProperty('--lvl', lv.toFixed(3));
     if (st.recording && rx.take) {
       var tk = rx.take, left = tk.startAt - now, beat = beatLen();
       if (tk.cd > 0 && left > 0) {
@@ -9470,7 +10051,8 @@ select.ie-in{width:auto}
     p.appendChild(b);
   }
 
-  // ---------- Sauvegarde automatique (IndexedDB « studio-fusion-audio ») ----------
+  // ---------- Sauvegarde automatique (IndexedDB « studio-fusion-audio ») : plusieurs sons ----------
+  // Stores : « session » (index « index », un enregistrement « p:<id> » par son) et « buffers » (audio, clés bN partagées)
   var DB_NAME = 'studio-fusion-audio';
   // Transaction : fn reçoit tx ; la promesse se résout à la fin de la transaction
   function idb(stores, mode, fn) {
@@ -9496,7 +10078,25 @@ select.ie-in{width:auto}
       };
     });
   }
-  // Instantané sérialisable : les buffers sont remplacés par une clé (bk) ; keys reçoit les buffers utilisés
+  // Lecture d'un enregistrement (après la fin de la transaction)
+  function idbGet(store, key) {
+    var rq = null;
+    return idb([store], 'readonly', function (tx) { rq = tx.objectStore(store).get(key); }).then(function () { return rq ? rq.result : null; });
+  }
+  function newProjId() { st.sess.pseq += 1; return 'p' + st.sess.pseq + '-' + Date.now().toString(36); }
+  // « Mon son N » : premier numéro libre
+  function nextName() {
+    var names = {}, n = st.sess.index.list.length + 1;
+    st.sess.index.list.forEach(function (m) { names[m.name] = true; });
+    while (names['Mon son ' + n]) n++;
+    return 'Mon son ' + n;
+  }
+  function adoptProject() { st.projId = newProjId(); st.pname = nextName(); }
+  function recDur(S) { var e = 0; (S.clips || []).forEach(function (c) { e = Math.max(e, c.start + c.duration); }); return e; }
+  function withMeta(id, patch) {
+    return { seq: st.sess.seq, pseq: st.sess.pseq, list: st.sess.index.list.map(function (m) { return m.id === id ? Object.assign({}, m, patch) : m; }) };
+  }
+  // Instantané sérialisable : les buffers sont remplacés par une clé (bk, et rk pour la prise d'origine)
   function packState(keys) {
     function ref(buf) {
       var k = pBuf.get(buf);
@@ -9510,34 +10110,43 @@ select.ie-in{width:auto}
     });
     var takes = st.takes.map(function (k) {
       var o = {};
-      Object.keys(k).forEach(function (f) { if (f !== 'buffer') o[f] = k[f]; });
+      Object.keys(k).forEach(function (f) { if (f !== 'buffer' && f !== 'raw') o[f] = k[f]; });
       o.bk = ref(k.buffer);
+      o.rk = ref(takeRaw(k));
       return o;
     });
     return {
+      name: st.pname,
       bpm: st.bpm, masterDb: st.masterDb, curve: st.curve, mode: st.mode, pxPerSec: st.pxPerSec,
       takeSeq: st.takeSeq, nextId: st.nextId, armedId: st.armedId,
       markers: st.markers, markerSeq: st.markerSeq, preRoll: st.preRoll,
       tracks: cloneP(st.tracks), clips: clips, takes: takes,
       mic: { countIn: st.mic.countIn, instru: st.mic.instru },
-      booth: { count: st.booth.count, start: st.booth.start, lastId: st.booth.lastId, acap: st.booth.acap },
+      booth: { count: st.booth.count, start: st.booth.start, lastId: st.booth.lastId, acap: st.booth.acap, autoSync: !!st.booth.autoSync, bal: st.booth.bal },
       lyrics: { text: st.lyr.text, times: st.lyr.times.slice(), fs: st.lyr.fs, mode: st.lyr.mode, speed: st.lyr.speed }
     };
   }
   function markDirty() {
-    if (!st.root || st.sess.pending || !st.sess.ok) return;
+    if (!st.root || !st.sess.ok) return;
     clearTimeout(st.sess.t);
     st.sess.t = setTimeout(function () { st.sess.t = null; saveNow(); }, 1500);
   }
+  // Enregistre le son ouvert (et l'index) ; un son sans nom est créé dès qu'il contient quelque chose
   function saveNow() {
-    if (!st.root || st.sess.pending || !st.sess.ok) return Promise.resolve(false);
+    if (!st.root || !st.sess.ok || !st.sess.index) return Promise.resolve(false);
     if (st.sess.busy) { st.sess.again = true; return st.sess.busy; }
+    if (!st.projId) {
+      if (!st.tracks.length && !st.clips.length && !st.takes.length && !st.lyr.text.trim()) return Promise.resolve(false);
+      adoptProject();
+    }
     var keys = {}, state = packState(keys), key = JSON.stringify(state);
     if (key === st.sess.lastKey) return Promise.resolve(true);
-    var writes = [], dels = [], k;
+    var writes = [], k, now = Date.now(), id = st.projId;
     for (k in keys) if (!st.sess.saved[k]) writes.push(k);
-    st.sess.bufs.forEach(function (x) { if (!keys[x]) dels.push(x); });
-    var rec = { savedAt: Date.now(), state: state, bufs: Object.keys(keys) };
+    var list = st.sess.index.list.filter(function (m) { return m.id !== id; });
+    list.push({ id: id, name: st.pname, at: now, dur: projectEnd(), nt: st.takes.length });
+    var idx = { seq: st.sess.seq, pseq: st.sess.pseq, list: list };
+    var rec = { savedAt: now, state: state, bufs: Object.keys(keys) };
     st.sess.busy = idb(['session', 'buffers'], 'readwrite', function (tx) {
       var bs = tx.objectStore('buffers');
       writes.forEach(function (w) {
@@ -9545,16 +10154,15 @@ select.ie-in{width:auto}
         for (var i = 0; i < b.numberOfChannels; i++) ch.push(b.getChannelData(i));
         bs.put({ sr: b.sampleRate, ch: ch }, w);
       });
-      dels.forEach(function (d) { bs.delete(d); });
-      tx.objectStore('session').put(rec, 'current');
+      tx.objectStore('session').put(rec, 'p:' + id);
+      tx.objectStore('session').put(idx, 'index');
     }).then(function () {
       writes.forEach(function (w) { st.sess.saved[w] = true; });
-      dels.forEach(function (d) { delete st.sess.saved[d]; });
-      st.sess.bufs = rec.bufs; st.sess.lastKey = key;
-      setSaved('Sauvegardé ✓ ' + clockOf(Date.now()));
+      st.sess.bufs = rec.bufs; st.sess.lastKey = key; st.sess.index = idx;
+      setSaved('Sauvegardé ✓ ' + clockOf(now));
       return true;
     }, function (err) {
-      showBanner('Sauvegarde impossible (' + ((err && err.message) || (err && err.name) || 'erreur') + '). La session reste ouverte mais ne sera pas conservée. Libérez de l’espace ou quittez la navigation privée.', 'err', null);
+      showBanner('Sauvegarde impossible (' + ((err && err.message) || (err && err.name) || 'erreur') + '). Le son reste ouvert mais ne sera pas conservée. Libérez de l’espace ou quittez la navigation privée.', 'err', null);
       setSaved('Non sauvegardé');
       return false;
     }).then(function (ok) {
@@ -9566,64 +10174,62 @@ select.ie-in{width:auto}
   }
   function flushSave() {
     if (st.sess.t) { clearTimeout(st.sess.t); st.sess.t = null; }
-    if (!st.sess.pending) saveNow();
+    saveNow();
   }
   function onHide() { if (document.hidden) flushSave(); }
   function sessError(err) {
     st.sess.ok = false;
-    showBanner('Sauvegarde automatique indisponible (' + ((err && err.message) || (err && err.name) || 'erreur') + '). La session ne sera pas conservée.', 'err', null);
+    showBanner('Sauvegarde automatique indisponible (' + ((err && err.message) || (err && err.name) || 'erreur') + '). Les sons ne seront pas conservés.', 'err', null);
     setSaved('Sauvegarde indisponible');
   }
-  // Au démarrage : une session existante doit être reprise ou écartée avant toute sauvegarde
-  function checkSession() {
-    var rq = null;
-    idb(['session'], 'readonly', function (tx) { rq = tx.objectStore('session').get('current'); }).then(function () {
-      var rec = rq && rq.result;
-      if (rec && rec.state && ((rec.state.tracks || []).length || (rec.state.clips || []).length || (rec.state.lyrics && rec.state.lyrics.text))) {
-        st.sess.found = rec; st.sess.pending = true;
-        showSessBanner('ask');
-        setSaved('Choisis une session pour activer la sauvegarde');
-        renderBooth();
-      } else {
-        setSaved('Sauvegarde automatique active');
-      }
-    }, sessError);
-  }
   function hideSess() { if (st.ui.sess) { st.ui.sess.hidden = true; st.ui.sess.innerHTML = ''; } }
-  function showSessBanner(stage) {
-    var b = st.ui.sess, f = st.sess.found;
-    if (!b || !f) return;
-    var S = f.state || {}, nT = (S.tracks || []).length, nK = (S.takes || []).length, when = fmtDate(f.savedAt);
-    b.innerHTML = '';
-    b.hidden = false;
-    var txt = stage === 'confirm'
-      ? 'Effacer définitivement la session du ' + when + ' ? Cette action est irréversible.'
-      : 'Reprendre ta session du ' + when + ' (' + nT + ' piste' + (nT > 1 ? 's' : '') + ', ' + nK + ' prise' + (nK > 1 ? 's' : '') + ') ?';
-    b.appendChild(el('span', 'as-banner-txt', txt));
-    var acts = el('div', 'as-banner-acts');
-    if (stage === 'confirm') {
-      tbtn(acts, 'Effacer définitivement', 'Effacer la session sauvegardée', clearSession, 'as-danger');
-      tbtn(acts, 'Annuler', 'Revenir au choix', function () { showSessBanner('ask'); });
-    } else {
-      tbtn(acts, 'Reprendre', 'Reprendre la session sauvegardée', restoreSession, 'on');
-      tbtn(acts, 'Nouvelle session', 'Commencer une nouvelle session (confirmation demandée)', function () { showSessBanner('confirm'); });
-    }
-    b.appendChild(acts);
-  }
   function maxSeq(keys) {
     var m = 0;
     (keys || []).forEach(function (k) { var n = parseInt(String(k).slice(1), 10); if (n > m) m = n; });
     return m;
   }
+  // Au démarrage : lit l'index ; l'ancienne session unique devient le son « Mon son 1 »
+  function loadIndex() {
+    var rqI = null, rqC = null;
+    idb(['session'], 'readonly', function (tx) {
+      rqI = tx.objectStore('session').get('index');
+      rqC = tx.objectStore('session').get('current');
+    }).then(function () {
+      var idx = rqI && rqI.result, cur = rqC && rqC.result;
+      if (idx) return finishIndex(idx);
+      if (cur && cur.state && ((cur.state.tracks || []).length || (cur.state.clips || []).length || (cur.state.lyrics && cur.state.lyrics.text))) {
+        var nid = 'p1-migr', S = cur.state;
+        S.name = 'Mon son 1';
+        var mIdx = { seq: maxSeq(cur.bufs), pseq: 1, list: [{ id: nid, name: 'Mon son 1', at: cur.savedAt || Date.now(), dur: recDur(S), nt: (S.takes || []).length }] };
+        return idb(['session'], 'readwrite', function (tx) {
+          tx.objectStore('session').put(cur, 'p:' + nid);
+          tx.objectStore('session').put(mIdx, 'index');
+          tx.objectStore('session').delete('current');
+        }).then(function () {
+          setStatus('Ta session précédente est rangée dans « Mon son 1 ».');
+          return finishIndex(mIdx);
+        });
+      }
+      return finishIndex({ seq: 0, pseq: 0, list: [] });
+    }).catch(sessError);
+  }
+  function finishIndex(idx) {
+    st.sess.index = { seq: idx.seq || 0, pseq: idx.pseq || 0, list: idx.list || [] };
+    st.sess.seq = Math.max(st.sess.seq, st.sess.index.seq);
+    st.sess.pseq = Math.max(st.sess.pseq, st.sess.index.pseq);
+    setSaved('Sauvegarde automatique active');
+    renderBooth();
+  }
+  // Recharge le son trouvé dans st.sess.found (audio relu depuis IndexedDB)
   function restoreSession() {
     var f = st.sess.found;
-    if (!f) return;
+    if (!f) return Promise.resolve();
     var ctx = getCtx(), keys = f.bufs || [], got = {};
-    idb(['buffers'], 'readonly', function (tx) {
+    return idb(['buffers'], 'readonly', function (tx) {
       var s = tx.objectStore('buffers');
       keys.forEach(function (k) { s.get(k).onsuccess = function (e) { got[k] = e.target.result; }; });
     }).then(function () {
-      var map = {}, S = f.state;
+      var map = {}, S = f.state, MIC = S.mic || {}, BK = S.booth || {};
       keys.forEach(function (k) {
         var g = got[k];
         if (!g || !g.ch || !g.ch.length) return;
@@ -9631,64 +10237,158 @@ select.ie-in{width:auto}
         g.ch.forEach(function (a, i) { b.copyToChannel(a, i); });
         map[k] = b; pBuf.set(b, k); st.sess.saved[k] = true;
       });
-      function fix(list) {
+      function fix(list, takes) {
         return (list || []).filter(function (o) { return map[o.bk]; }).map(function (o) {
-          var r = Object.assign({}, o); r.buffer = map[o.bk]; delete r.bk; return r;
+          var r = Object.assign({}, o); r.buffer = map[o.bk]; delete r.bk;
+          if (takes) { r.raw = (o.rk && map[o.rk]) || r.buffer; delete r.rk; }
+          return r;
         });
       }
+      st.pname = S.name || 'Mon son';
       st.masterDb = S.masterDb; st.bpm = S.bpm; st.curve = S.curve; st.mode = S.mode; st.pxPerSec = S.pxPerSec;
       st.takeSeq = S.takeSeq; st.nextId = Math.max(st.nextId, S.nextId);
       st.markers = (S.markers || []).map(cloneP); st.markerSeq = S.markerSeq || 0; st.preRoll = S.preRoll != null ? S.preRoll : 2; st.selSet = []; autoRt = {};
       st.tracks = S.tracks;
-      st.clips = fix(S.clips);
-      st.takes = fix(S.takes);
+      st.clips = fix(S.clips, false);
+      st.takes = fix(S.takes, true);
       st.armedId = null; st.selClip = null; st.selTrack = null; st.selRange = null; st.spot = null; st.insSel = null;
-      st.mic.countIn = S.mic.countIn; st.mic.instru = S.mic.instru;
-      st.booth.count = S.booth.count; st.booth.start = S.booth.start; st.booth.acap = S.booth.acap;
+      st.mic.countIn = MIC.countIn || 0; st.mic.instru = MIC.instru != null ? MIC.instru : 100;
+      st.booth.count = BK.count !== false; st.booth.start = BK.start || 'zero'; st.booth.acap = !!BK.acap;
+      st.booth.autoSync = !!BK.autoSync; st.booth.bal = BK.bal == null ? 50 : BK.bal;
       var LY = S.lyrics || {};
       st.lyr.text = String(LY.text || ''); st.lyr.times = Array.isArray(LY.times) ? LY.times.slice() : [];
       lyrApplyPrefs(LY); saveLyrPrefs();
       st.lyr.cal = null; st.lyr.cur = 0; st.lyr.anchor = null; st.lyr.editing = !st.lyr.text.trim(); st.ui.pSig = null;
-      st.booth.lastId = takeById(S.booth.lastId) ? S.booth.lastId : null;
+      st.booth.lastId = takeById(BK.lastId) ? BK.lastId : null;
       st.sess.seq = Math.max(st.sess.seq, maxSeq(keys));
       st.sess.bufs = Object.keys(map);
       st.sess.lastKey = '';
-      st.sess.pending = false; st.sess.found = null;
+      st.sess.found = null;
       st.undo = []; st.redo = [];
       st.last = snapshot(); st.lastSer = serial(st.last);
       hideSess();
       renderAll();
       updateHistBtns();
-      setStatus('Session reprise : ' + st.tracks.length + ' piste(s), ' + st.takes.length + ' prise(s).');
-      setSaved('Session reprise');
+      setStatus('Son ouvert : ' + st.tracks.length + ' piste(s), ' + st.takes.length + ' prise(s).');
+      setSaved('Sauvegarde automatique active');
       var missing = (S.clips || []).length - st.clips.length + (S.takes || []).length - st.takes.length;
       if (missing > 0) showBanner(missing + ' élément(s) audio introuvable(s) dans la sauvegarde.', 'err', null);
     }).catch(function (err) {
-      showBanner('Reprise impossible (' + ((err && err.message) || 'erreur') + '). La session sauvegardée est conservée.', 'err', null);
-      showSessBanner('ask');
+      showBanner('Ouverture impossible (' + ((err && err.message) || 'erreur') + ').', 'err', null);
     });
   }
-  function clearSession() {
-    idb(['session', 'buffers'], 'readwrite', function (tx) {
-      tx.objectStore('session').clear();
-      tx.objectStore('buffers').clear();
-    }).then(function () {
-      pBuf = new WeakMap();
-      st.sess.pending = false; st.sess.found = null; st.sess.saved = {}; st.sess.bufs = []; st.sess.lastKey = '';
-      st.tracks = []; st.clips = []; st.takes = []; st.markers = []; st.markerSeq = 0; st.selSet = []; autoRt = {};
-      st.selClip = null; st.selTrack = null; st.selRange = null; st.armedId = null;
-      st.booth.lastId = null;
-      st.lyr.text = ''; st.lyr.times = []; st.lyr.cur = 0; st.lyr.cal = null; st.lyr.anchor = null; st.lyr.editing = true; st.ui.pSig = null;
-      st.undo = []; st.redo = [];
-      st.last = snapshot(); st.lastSer = serial(st.last);
-      hideSess();
-      renderAll();
-      updateHistBtns();
-      setSaved('Nouvelle session');
-      setStatus('Nouvelle session : projet vide.');
-    }, function (err) {
-      showSessBanner('ask');
-      showBanner('Effacement impossible (' + ((err && err.message) || 'erreur') + ').', 'err', null);
+  // Vide l'état en mémoire (le son précédent est déjà sauvegardé)
+  function resetState() {
+    stopPreview();
+    closeSync();
+    varCache.clear();
+    pBuf = new WeakMap();
+    st.tracks = []; st.clips = []; st.takes = []; st.markers = []; st.markerSeq = 0; st.selSet = []; autoRt = {};
+    st.selClip = null; st.selTrack = null; st.selRange = null; st.armedId = null; st.spot = null; st.insSel = null;
+    st.booth = { hp: st.booth.hp, micErr: st.booth.micErr, count: true, start: 'zero', lastId: null, acap: false,
+      prev: null, prevId: null, autoSync: false, bal: 50, tkId: null, fxBusy: false };
+    st.lyr.text = ''; st.lyr.times = []; st.lyr.cur = 0; st.lyr.cal = null; st.lyr.anchor = null; st.lyr.editing = true; st.ui.pSig = null;
+    st.undo = []; st.redo = [];
+    st.last = snapshot(); st.lastSer = serial(st.last);
+    st.sess.lastKey = ''; st.sess.bufs = [];
+    st.ui.bandFor = null; st.ui.zoneFor = null; st.ui.tkFor = null; st.ui.tkChipSig = null; st.ui.libSig = null;
+    if (st.ui.shTake) closeOv(st.ui.shTake);
+  }
+  // Ouvre un son de la bibliothèque (le son ouvert est sauvegardé avant)
+  function openProject(id, then) {
+    if (st.recording || st.recPending) { setStatus('Termine l’enregistrement avant de changer de son.', true); return; }
+    var p = st.sess.busy || Promise.resolve();
+    p.then(function () { return saveNow(); }).then(function () {
+      return idbGet('session', 'p:' + id);
+    }).then(function (r) {
+      if (!r || !r.state) { setStatus('Ce son est introuvable.', true); renderBooth(); return null; }
+      resetState();
+      st.projId = id;
+      st.sess.found = r;
+      st.bview = 'studio';
+      return restoreSession().then(function () { renderBooth(); if (then) then(); });
+    }).catch(function (err) {
+      showBanner('Ouverture impossible (' + ((err && err.message) || 'erreur') + ').', 'err', null);
+    });
+  }
+  // Nouveau son : beat importé (ou a cappella), casque demandé la première fois
+  function createSound(file) {
+    closeOv(st.ui.shNew);
+    var p = st.sess.busy || Promise.resolve();
+    p.then(function () { return saveNow(); }).then(function () {
+      resetState();
+      st.projId = newProjId(); st.pname = nextName();
+      st.bview = 'studio';
+      st.booth.acap = !file;
+      saveNow();
+      if (file) importInstru(file);
+      if (!st.booth.hp) openHpSheet(null);
+      renderBooth();
+    });
+  }
+  function duplicateProject(id) {
+    var p = st.sess.busy || Promise.resolve();
+    p.then(function () { return saveNow(); }).then(function () { return idbGet('session', 'p:' + id); }).then(function (r) {
+      if (!r) return;
+      var nid = newProjId(), now = Date.now(), copy = JSON.parse(JSON.stringify(r));
+      copy.state.name = (r.state.name || 'Mon son') + ' (copie)';
+      copy.savedAt = now;
+      var meta = { id: nid, name: copy.state.name, at: now, dur: recDur(copy.state), nt: (copy.state.takes || []).length };
+      var idx = { seq: st.sess.seq, pseq: st.sess.pseq, list: st.sess.index.list.concat([meta]) };
+      return idb(['session'], 'readwrite', function (tx) {
+        tx.objectStore('session').put(copy, 'p:' + nid);
+        tx.objectStore('session').put(idx, 'index');
+      }).then(function () { st.sess.index = idx; setStatus('Son dupliqué : ' + copy.state.name + '.'); });
+    }).then(renderBooth).catch(function (err) {
+      showBanner('Duplication impossible (' + ((err && err.message) || 'erreur') + ').', 'err', null);
+    });
+  }
+  function renameProject(id, name) {
+    name = String(name || '').trim().slice(0, 60) || 'Sans titre';
+    var p = st.sess.busy || Promise.resolve();
+    p.then(function () {
+      if (id === st.projId) { st.pname = name; return saveNow(); }
+      return idbGet('session', 'p:' + id).then(function (r) {
+        if (!r) return null;
+        r.state.name = name;
+        var idx = withMeta(id, { name: name });
+        return idb(['session'], 'readwrite', function (tx) {
+          tx.objectStore('session').put(r, 'p:' + id);
+          tx.objectStore('session').put(idx, 'index');
+        }).then(function () { st.sess.index = idx; });
+      });
+    }).then(function () { renderBooth(); setStatus('Son renommé : ' + name + '.'); }).catch(function (err) {
+      showBanner('Renommage impossible (' + ((err && err.message) || 'erreur') + ').', 'err', null);
+    });
+  }
+  // Supprime un son ; ses audios ne sont effacés que s'ils ne servent à aucun autre son
+  function deleteProject(id) {
+    var p = st.sess.busy || Promise.resolve(), dead = [];
+    p.then(function () { return saveNow(); }).then(function () { return idbGet('session', 'p:' + id); }).then(function (r) {
+      dead = r && r.bufs ? r.bufs.slice() : [];
+      if (id === st.projId) { resetState(); st.projId = null; st.pname = ''; st.bview = 'lib'; }
+      var idx = { seq: st.sess.seq, pseq: st.sess.pseq, list: st.sess.index.list.filter(function (m) { return m.id !== id; }) };
+      return idb(['session'], 'readwrite', function (tx) {
+        tx.objectStore('session').delete('p:' + id);
+        tx.objectStore('session').put(idx, 'index');
+      }).then(function () { st.sess.index = idx; return gcBuffers(dead); });
+    }).then(function () { renderBooth(); setStatus('Son supprimé.'); }).catch(function (err) {
+      showBanner('Suppression impossible (' + ((err && err.message) || 'erreur') + ').', 'err', null);
+    });
+  }
+  function gcBuffers(dead) {
+    if (!dead.length) return Promise.resolve();
+    var reads = st.sess.index.list.map(function (m) { return idbGet('session', 'p:' + m.id); });
+    return Promise.all(reads).then(function (recs) {
+      var used = {};
+      recs.forEach(function (r) { (r && r.bufs || []).forEach(function (b) { used[b] = true; }); });
+      (st.sess.bufs || []).forEach(function (b) { used[b] = true; });
+      var del = dead.filter(function (b) { return !used[b]; });
+      if (!del.length) return null;
+      del.forEach(function (b) { delete st.sess.saved[b]; });
+      return idb(['buffers'], 'readwrite', function (tx) {
+        del.forEach(function (b) { tx.objectStore('buffers').delete(b); });
+      });
     });
   }
 
@@ -9728,6 +10428,7 @@ select.ie-in{width:auto}
       else if (e.code === 'KeyR') { e.preventDefault(); if (!e.repeat) toggleRecord(); }
       else if (e.code === 'KeyB') { e.preventDefault(); splitSelected(); }
       else if (e.code === 'Delete') { e.preventDefault(); deleteSelected(); }
+      else if (e.code === 'Escape' && closeBoothOv()) { /* feuille de la Cabine fermée */ }
       else if (e.code === 'Escape' && st.sheet) { toggleSheet(false); }
       else if (e.code === 'Enter') { e.preventDefault(); if (!e.repeat) addMarkerHere(); }
     });
@@ -10106,7 +10807,7 @@ select.ie-in{width:auto}
     c.startRendering().then(function (buf) {
       st.exporting = false;
       var dur = buf.duration.toFixed(1);
-      return (window.sfSave ? window.sfSave('mixage.wav', encodeWav(buf, +st.exp.bits)) : Promise.resolve('Téléchargement indisponible.'))
+      return (window.sfSave ? window.sfSave(fileBase() + '.wav', encodeWav(buf, +st.exp.bits)) : Promise.resolve('Téléchargement indisponible.'))
         .then(function (msg) { setStatus(msg || ('Mixage exporté (mixage.wav, ' + dur + ' s).')); });
     }).catch(function (err) {
       st.exporting = false;
@@ -10145,7 +10846,7 @@ select.ie-in{width:auto}
     chain.then(function () {
       st.exporting = false;
       var zip = makeZip(files);
-      return window.sfSave ? window.sfSave('stems.zip', zip) : Promise.resolve('Téléchargement indisponible.');
+      return window.sfSave ? window.sfSave(fileBase() + ' - pistes.zip', zip) : Promise.resolve('Téléchargement indisponible.');
     }).then(function (msg) {
       setStatus(msg || ('Pistes exportées : stems.zip (' + files.length + ' fichiers WAV).'));
     }).catch(function (err) {
@@ -10222,7 +10923,7 @@ select.ie-in{width:auto}
     st.root = rootEl;
     rootEl.innerHTML = '';
     var style = el('style');
-    style.textContent = CSS + '\n' + CSS_SYNC;
+    style.textContent = CSS + '\n' + CSS_SYNC + '\n' + CSS_CAB;
     rootEl.appendChild(style);
     var wrap = el('div', 'as-root');
     rootEl.appendChild(wrap);
@@ -10253,12 +10954,13 @@ select.ie-in{width:auto}
     st.last = snapshot(); st.lastSer = serial(st.last);
     st.mic.latency = loadLatency();
     st.booth.hp = loadHP();
+    st.pro = loadPro();
     loadLyrPrefs();
     showTab(st.narrow ? 'booth' : 'edit');
     updateHistBtns();
     document.addEventListener('visibilitychange', onHide);
     window.addEventListener('pagehide', flushSave);
-    checkSession();
+    loadIndex();
   }
 
   // ---------- Recalage voix / temps (« Recaler sur le temps ») : moteur ----------
@@ -10670,7 +11372,7 @@ select.ie-in{width:auto}
     }
     return out;
   }
-  function openSync(src) {
+  function openSync(src, quiet) {
     if (st.recording || st.recPending) { setStatus('Termine l’enregistrement avant de recaler.', true); return; }
     if (!src || !src.buffer) { setStatus('Sélectionne une prise ou un clip à recaler.', true); return; }
     stopSync();
@@ -10687,12 +11389,13 @@ select.ie-in{width:auto}
     SY.bpm = st.bpm;
     SY.haveVox = false; SY.haveGrid = !SY.ic; SY.t0 = 0; SY.ph = 0;
     SY.open = true;
-    if (SY.ui) SY.ui.ov.hidden = false;
+    if (SY.ui && !quiet) SY.ui.ov.hidden = false;
     syncAnalyzeVoice();
     syncAnalyzeInstru(false);
     renderSync();
   }
   function closeSync() {
+    SY.hook = null;
     stopSync();
     clearTimeout(SY.rt); SY.rt = null;
     SY.open = false;
@@ -10744,6 +11447,7 @@ select.ie-in{width:auto}
       buf.copyToChannel(r.ch[0], 0); buf.copyToChannel(r.ch[1] || r.ch[0], 1);
       SY.out = { buf: buf, info: r };
       SY.pk.A = null;
+      if (SY.hook) { var hk = SY.hook; SY.hook = null; hk(); }
     });
   }
   // Sources : prise (Mes prises) ou clip sélectionné (Édition)
@@ -11040,6 +11744,8 @@ select.ie-in{width:auto}
     init: init,
     // Accès de test au moteur de recalage (fonction autonome)
     _syncEngine: function () { return syncEngine(); },
+    // Accès de test à la réduction du bruit (fonction autonome, buffer -> { buf, noiseDb, cut })
+    _denoise: function (buf) { return denoiseBuffer(buf); },
     // Affiche une vue : 'booth' (Cabine), 'edit' (Édition) ou 'mix' (Mixage)
     showView: function (name) { if (st.root && (name === 'booth' || name === 'edit' || name === 'mix')) showTab(name); },
     saveNow: function () { return saveNow(); },
@@ -11058,7 +11764,7 @@ select.ie-in{width:auto}
     // Hook de test non documenté
     _debug: function () {
       return {
-        tracks: st.tracks.map(function (t) { return { id: t.id, type: t.type, name: t.name, clips: clipsOf(t.id).length }; }),
+        tracks: st.tracks.map(function (t) { return { id: t.id, type: t.type, name: t.name, clips: clipsOf(t.id).length, pan: t.pan, preset: t.preset || null, inserts: t.inserts.map(function (i) { return i ? i.type : null; }) }; }),
         clips: st.clips.map(function (c) { return { id: c.id, name: c.name, trackId: c.trackId, start: c.start, duration: c.duration, offset: c.offset, fadeIn: c.fadeIn, fadeOut: c.fadeOut, takeId: c.takeId || null, gainDb: c.gainDb }; }),
         markers: st.markers.map(function (m) { return { name: m.name, t: m.t }; }),
         auto: st.tracks.map(function (t) { var a = t.auto || {}; return { id: t.id, mode: a.mode || 'off', vol: (a.vol || []).map(function (q) { return [q.t, q.v]; }), pan: (a.pan || []).length }; }),
