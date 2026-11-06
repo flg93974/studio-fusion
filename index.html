@@ -4798,6 +4798,7 @@ select.ie-in{width:auto}
     guide: null                          // test d'écoute guidé en cours
   };
   st.markers = []; st.markerSeq = 0; st.selSet = []; st.clipboard = null;
+  st.amix = amixFrom(null); st.syncPref = syncPrefFrom(null);
   // Mes paroles (Cabine) : texte, temps des lignes (s, dans le morceau), réglages du prompteur
   st.lyr = { text: '', times: [], fs: 26, mode: 'auto', speed: 1, cur: 0, anchor: null, preview: false, editing: true, cal: null, tc: null };
   st.exp = { sr: 44100, bits: 16, master: true };
@@ -4885,6 +4886,10 @@ select.ie-in{width:auto}
   // ---------- Icônes (style lucide : viewBox 24, trait 1.8) ----------
   var ICONS = {
     play: '<path d="M7 4.5v15l12.5-7.5z" fill="currentColor" stroke="none"/>',
+    copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
+    volume: '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>',
+    swap: '<path d="M7 4 3 8l4 4"/><path d="M3 8h14"/><path d="m17 20 4-4-4-4"/><path d="M21 16H7"/>',
+    reset: '<path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 3 3 9 9 9"/>',
     pause: '<rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor" stroke="none"/>',
     stop: '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/>',
     rec: '<circle cx="12" cy="12" r="6.5" fill="currentColor" stroke="none"/>',
@@ -5512,6 +5517,13 @@ select.ie-in{width:auto}
         prev = node.output;
         g.ins[t.id + ':' + i] = node;
       }
+      // Beat : ducking (baisse pendant la voix) et creusement à 3 kHz, automatisés d'après la présence de la voix
+      if (!dkSkip && t.type !== 'aux' && (st.amix.duck > 0 || st.amix.dyn > 0) && t === instruTrack() && (!only || mine)) {
+        var dkE = add(c.createBiquadFilter()), dkG = add(c.createGain());
+        dkE.type = 'peaking'; dkE.frequency.value = 3000; dkE.Q.value = 1.2; dkE.gain.value = 0;
+        prev.connect(dkE); dkE.connect(dkG); prev = dkG;
+        scheduleDuck(dkG.gain, dkE.gain, duckEnv(projectEnd() + 10), P0, C00);
+      }
       var gv = (only && mine) ? (t.muted ? 0 : dbToGain(t.db)) : trackGainValue(t);
       var gate = add(c.createGain());
       gate.gain.value = gv > 0 ? 1 : 0;
@@ -5868,8 +5880,10 @@ select.ie-in{width:auto}
       tracks: st.tracks.map(function (t) { return cloneP(t); }),
       clips: st.clips.map(function (c) {
         return { id: c.id, trackId: c.trackId, name: c.name, buffer: c.buffer, start: c.start, offset: c.offset,
-          duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null };
+          duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null,
+          orig: c.orig || null, ie: c.ie ? cloneP(c.ie) : null };
       }),
+      bpm: st.bpm, key: st.key ? cloneP(st.key) : null, amix: cloneP(st.amix),
       takes: st.takes.map(function (k) { return Object.assign({}, k); }),
       markers: st.markers.map(cloneP),
       lyr: { text: st.lyr.text, times: st.lyr.times.slice() },
@@ -5877,14 +5891,17 @@ select.ie-in{width:auto}
     };
   }
   function serial(s) {
-    return JSON.stringify(s, function (k, v) { return (k === 'buffer' || k === 'raw') ? bufId(v) : v; });
+    return JSON.stringify(s, function (k, v) { return ((k === 'buffer' || k === 'raw' || k === 'orig') && v) ? bufId(v) : v; });
   }
   function applySnap(s) {
     var selId = st.selClip && st.selClip.id;
     autoRecDiscard();
     st.masterDb = s.masterDb;
     st.tracks = s.tracks.map(cloneP);
-    st.clips = s.clips.map(function (c) { return { id: c.id, trackId: c.trackId, name: c.name, buffer: c.buffer, start: c.start, offset: c.offset, duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null }; });
+    st.clips = s.clips.map(function (c) { return { id: c.id, trackId: c.trackId, name: c.name, buffer: c.buffer, start: c.start, offset: c.offset, duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null, orig: c.orig || null, ie: c.ie ? cloneP(c.ie) : null }; });
+    if (s.bpm != null) st.bpm = s.bpm;
+    st.key = s.key ? cloneP(s.key) : null;
+    if (s.amix) st.amix = cloneP(s.amix);
     st.takes = (s.takes || []).map(function (k) { return Object.assign({}, k); });
     st.markers = (s.markers || []).map(cloneP);
     if (s.lyr) { st.lyr.text = s.lyr.text; st.lyr.times = s.lyr.times.slice(); st.lyr.cal = null; st.ui.pSig = null; }
@@ -5941,6 +5958,7 @@ select.ie-in{width:auto}
   }
   function updateHistBtns() {
     var u = st.ui;
+    if (u.hUndo) { u.hUndo.disabled = !st.undo.length; u.hRedo.disabled = !st.redo.length; }
     if (!u.undoBtn) return;
     var lastU = st.undo[st.undo.length - 1], lastR = st.redo[st.redo.length - 1];
     u.undoBtn.disabled = !st.undo.length;
@@ -7055,6 +7073,7 @@ select.ie-in{width:auto}
     saveNow();
     if (!opt.noHist) setStatus(name + ' ajoutée à « ' + t.name + ' » : ' + clip.duration.toFixed(3) + ' s, latence compensée de ' + take.lat + ' ms' + (take.boostDb > 0.5 ? ', voix trop faible remontée de +' + take.boostDb.toFixed(1) + ' dB' : '') + (pk <= 0.0005 ? ' — attention : prise quasi silencieuse, vérifie le micro choisi' : '') + '.');
     if (!opt.noHist) openTakeSheet(tk, true);
+    if (!opt.noHist) amixAfterTake();
   }
   function dropTrack(tid) {
     st.clips = st.clips.filter(function (c) { return c.trackId !== tid; });
@@ -9936,6 +9955,8 @@ select.ie-in{width:auto}
     u.shHp = mkSheet(win, 'Ton casque');
     u.shTake = mkSheet(win, 'Ta prise');
     u.shTune = mkSheet(win, 'Autotune');
+    u.shInstru = mkSheet(win, 'Modifier l’instru');
+    u.shMix = mkSheet(win, 'Mixage auto');
     u.shExp = mkSheet(win, 'Exporter');
     u.shMenu = mkSheet(win, 'Son');
     u.shRen = mkSheet(win, 'Renommer');
@@ -9945,6 +9966,8 @@ select.ie-in{width:auto}
     buildShHp(u.shHp.body);
     buildShTake(u.shTake.body);
     buildShTune(u.shTune.body);
+    buildShInstru(u.shInstru.body);
+    buildShMix(u.shMix.body);
     buildShExp(u.shExp.body);
     buildShMenu(u.shMenu.body);
     buildShRen(u.shRen.body);
@@ -10057,6 +10080,8 @@ select.ie-in{width:auto}
     u.stNameIn.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); u.stNameIn.blur(); } });
     u.stNameIn.addEventListener('blur', commitStRename);
     sTop.appendChild(u.stName); sTop.appendChild(u.stNameIn);
+    u.hUndo = ibtn(sTop, 'undo', '', 'Annuler (Ctrl+Z)', undo, 'as-st-h');
+    u.hRedo = ibtn(sTop, 'redo', '', 'Rétablir (Ctrl+Y)', redo, 'as-st-h');
     cbtn(sTop, 'export', 'Exporter', 'sm', openExport);
     ibtn(sTop, 'gear', '', 'Réglages (casque, latence, micro, recalage automatique, mode pro)', function () { toggleSheet(true); }, 'as-gear');
     u.stuV.appendChild(sTop);
@@ -10114,16 +10139,36 @@ select.ie-in{width:auto}
     band.appendChild(bVol);
     u.stuV.appendChild(band);
 
-    // Zone centrale : prompteur des paroles (s'il y en a) ou forme d'onde de la dernière prise
-    u.zone = el('section', 'as-zone');
+    // Zone centrale : mini-timeline (beat + couches de voix), barre d'actions, prompteur des paroles dessous
+    u.zone = el('section', 'as-zone as-tlz');
     var zH = el('div', 'as-zone-h');
-    zH.appendChild(el('span', 'as-zone-t', 'Ta voix'));
-    cbtn(zH, 'lyrics', 'Paroles', 'sm', openLyrics);
+    zH.appendChild(el('span', 'as-zone-t', 'Morceau'));
+    u.tlTime = el('span', 'as-tl-time', '00:00');
+    zH.appendChild(u.tlTime);
+    var zB = el('div', 'as-tl-hb');
+    ibtn(zB, 'zoomout', '', 'Zoom arrière (ou pincement à deux doigts)', function () { tlZoom(1 / 1.5); });
+    ibtn(zB, 'zoomin', '', 'Zoom avant (ou pincement à deux doigts)', function () { tlZoom(1.5); });
+    cbtn(zB, 'lyrics', 'Paroles', 'sm', openLyrics);
+    cbtn(zB, 'sliders', 'Mixage auto', 'sm', openMix);
+    zH.appendChild(zB);
     u.zone.appendChild(zH);
+    u.tlScroll = el('div', 'as-tl-scroll');
+    u.tlScroll.setAttribute('aria-label', 'Mini-timeline : beat et couches de voix');
+    u.tlCont = el('div', 'as-tl-cont');
+    u.tlScroll.appendChild(u.tlCont);
+    u.tlScroll.addEventListener('pointerdown', tlPtrDown, true);
+    u.tlScroll.addEventListener('pointermove', tlPtrMove);
+    u.tlScroll.addEventListener('pointerup', tlPtrUp);
+    u.tlScroll.addEventListener('pointercancel', tlPtrUp);
+    u.zone.appendChild(u.tlScroll);
+    u.tlAct = el('div', 'as-tl-act');
+    u.zone.appendChild(u.tlAct);
+    u.tlPanel = el('div', 'as-tl-panel');
+    u.tlPanel.hidden = true;
+    u.zone.appendChild(u.tlPanel);
     u.recWrap = el('canvas', 'as-zone-cv');   // point d'insertion du prompteur (zone)
+    u.recWrap.hidden = true;
     u.zone.appendChild(u.recWrap);
-    u.zoneEmpty = el('div', 'as-zone-e', 'Ta prise apparaîtra ici après l’enregistrement.');
-    u.zone.appendChild(u.zoneEmpty);
     u.recIdle = u.zone;
     u.stuV.appendChild(u.zone);
 
@@ -10542,6 +10587,7 @@ select.ie-in{width:auto}
     cbtn(body, 'mic', 'Voix seule', 'xl', function () { closeOv(u.shExp); exportVoice(); });
     cbtn(body, 'bus', 'Pistes séparées (.zip)', 'xl', function () { closeOv(u.shExp); exportStems(); });
     cbtn(body, 'auto', 'Équilibrer les volumes', 'xl', function () { autoMix(); });
+    cbtn(body, 'sliders', 'Réglages du mixage auto', 'xl', function () { closeOv(u.shExp); openMix(); });
     buildMastUI(body);
   }
   // Section « Mastering » de l'export : interrupteur, préréglages, courbe de référence, mesure de la dernière sortie
@@ -10681,7 +10727,7 @@ select.ie-in{width:auto}
   }
   function renderStudio() {
     var u = st.ui, b = st.booth, voice = voiceTrack(), instru = instruTrack(), ic = instru ? firstClipOf(instru) : null;
-    var rec = st.recording, hasLyr = lyrHas(), lt = takeById(b.lastId);
+    var rec = st.recording, hasLyr = lyrHas();
     if (u.stNameIn.hidden) u.stName.textContent = st.pname || 'Sans titre';
     u.bandName.textContent = ic ? ic.name : 'Sans beat (a cappella)';
     u.bandChg._lbl.textContent = ic ? 'Changer le beat' : 'Ajouter un beat';
@@ -10704,11 +10750,7 @@ select.ie-in{width:auto}
     if (document.activeElement !== u.bandVol) u.bandVol.value = pctOf(instru);
     u.bandVolV.textContent = pctOf(instru) + ' %';
     u.zone.hidden = rec;
-    var showWave = !!lt && !hasLyr;
-    u.zoneEmpty.hidden = showWave || hasLyr;
-    u.recWrap.hidden = !showWave;
-    if (showWave && u.zoneFor !== lt.buffer) { u.zoneFor = lt.buffer; drawMini(u.recWrap, lt.buffer); }
-    if (!showWave) u.zoneFor = null;
+    if (!rec) renderTimeline();
     var cur = presetOf(voice);
     Object.keys(u.tiles).forEach(function (k) {
       var on = cur === k;
@@ -10792,6 +10834,8 @@ select.ie-in{width:auto}
     renderHpSheet();
     renderTakeSheet();
     renderTuneSheet();
+    renderInstru();
+    renderMix();
     renderMast();
   }
 
@@ -10847,7 +10891,6 @@ select.ie-in{width:auto}
   }
   // Recalage sur le temps : moteur existant (grille 1/8, force 70 %), résultat renvoyé par rappel
   function syncVariant(buf, tk, cb) {
-    SY.grid = '1/8'; SY.force = 70; SY.swing = 0;
     var src = { take: null, clip: null, name: 'Prise ' + tk.num, buffer: buf, trackId: tk.trackId, start: tk.base,
       offset: 0, duration: buf.duration, fadeIn: 0, fadeOut: 0, gainDb: 0, curve: st.curve };
     SY.hook = function () { var out = SY.out ? SY.out.buf : null; closeSync(); cb(out); };
@@ -11481,6 +11524,7 @@ select.ie-in{width:auto}
     var pos = c && st.playing ? currentPos() : st.playhead;
     u.bandTime.textContent = fmtTime(pos, false);
     if (u.bandDur > 0) u.bandPos.style.left = (clamp((pos - u.bandStart) / u.bandDur, 0, 1) * 100).toFixed(2) + '%';
+    tlPos(pos);
     lyrTick();
     var lv = 0;
     if (rx.stream && rx.an && rx.buf) {
@@ -11571,7 +11615,8 @@ select.ie-in{width:auto}
     }
     var clips = st.clips.map(function (c) {
       return { id: c.id, trackId: c.trackId, name: c.name, start: c.start, offset: c.offset, duration: c.duration,
-        fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null, bk: ref(c.buffer) };
+        fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: c.takeId || null, bk: ref(c.buffer),
+        ok: c.orig ? ref(c.orig) : null, ie: c.ie ? cloneP(c.ie) : null };
     });
     var takes = st.takes.map(function (k) {
       var o = {};
@@ -11589,7 +11634,7 @@ select.ie-in{width:auto}
       mic: { countIn: st.mic.countIn, instru: st.mic.instru },
       booth: { count: st.booth.count, start: st.booth.start, lastId: st.booth.lastId, acap: st.booth.acap, autoSync: !!st.booth.autoSync, bal: st.booth.bal, tune: cloneP(st.booth.tune) },
       lyrics: { text: st.lyr.text, times: st.lyr.times.slice(), fs: st.lyr.fs, mode: st.lyr.mode, speed: st.lyr.speed },
-      mast: cloneP(st.mast)
+      mast: cloneP(st.mast), amix: cloneP(st.amix), syncPref: cloneP(st.syncPref)
     };
   }
   function markDirty() {
@@ -11706,6 +11751,7 @@ select.ie-in{width:auto}
       function fix(list, takes) {
         return (list || []).filter(function (o) { return map[o.bk]; }).map(function (o) {
           var r = Object.assign({}, o); r.buffer = map[o.bk]; delete r.bk;
+          if (!takes) { if (o.ok && map[o.ok]) r.orig = map[o.ok]; delete r.ok; }
           if (takes) { r.raw = (o.rk && map[o.rk]) || r.buffer; delete r.rk; }
           return r;
         });
@@ -11719,6 +11765,7 @@ select.ie-in{width:auto}
       st.takes = fix(S.takes, true);
       st.armedId = null; st.selClip = null; st.selTrack = null; st.selRange = null; st.spot = null; st.insSel = null;
       st.mic.countIn = MIC.countIn || 0; st.mic.instru = MIC.instru != null ? MIC.instru : 100;
+      st.amix = amixFrom(S.amix); st.syncPref = syncPrefFrom(S.syncPref);
       var MS = S.mast || {};
       st.mast = { on: !!MS.on, preset: mastPreset(MS.preset).k, ref: (MS.ref && MS.ref.bands && MS.ref.bands.length === REF_BANDS.length) ? cloneP(MS.ref) : null };
       st.booth.count = BK.count !== false; st.booth.start = BK.start || 'zero'; st.booth.acap = !!BK.acap;
@@ -12358,14 +12405,36 @@ select.ie-in{width:auto}
     });
     return r;
   }
+  var dkSkip = false; // vrai pendant la mesure par piste : pas de ducking (niveaux bruts)
   function measureTrack(t, end, sr) {
     // buildGraph lit t.db au moment de la construction (synchrone) : on le ramène à 0 dB puis on le restaure
     var keep = t.db, p;
     t.db = 0;
-    try { p = renderTrackOnly(t, end, sr, false); } finally { t.db = keep; }
+    try { dkSkip = true; p = renderTrackOnly(t, end, sr, false); } finally { t.db = keep; dkSkip = false; }
     return p.then(function (buf) {
       var ch = [], c;
       for (c = 0; c < buf.numberOfChannels; c++) ch.push(buf.getChannelData(c));
+      return loudPowers(ch, sr);
+    });
+  }
+  // Mesure d'une piste rendue seule par le même graphe que l'export : les autres pistes sont coupées et le solo retiré
+  // pendant la construction ; keepDb garde le fader actuel (sinon 0 dB, pour mesurer le rapport linéairement)
+  function measureFull(t, end, sr, keepDb) {
+    var saved = st.tracks.map(function (q) { return [q, q.muted, q.solo, q.db]; }), keepDk = dkSkip, c, g;
+    st.tracks.forEach(function (q) { q.solo = false; q.muted = (q !== t && q.type !== 'aux') ? true : (q.type === 'aux' ? q.muted : false); });
+    if (!keepDb) t.db = 0;
+    dkSkip = true;
+    try {
+      c = new OfflineAudioContext(2, Math.ceil((end + exportTail()) * sr), sr);
+      g = buildGraph(c, c.destination, false, {});
+      startSources(g, 0, 0, null);
+    } finally {
+      saved.forEach(function (x) { x[0].muted = x[1]; x[0].solo = x[2]; x[0].db = x[3]; });
+      dkSkip = keepDk;
+    }
+    return c.startRendering().then(function (buf) {
+      var ch = [], k;
+      for (k = 0; k < buf.numberOfChannels; k++) ch.push(buf.getChannelData(k));
       return loudPowers(ch, sr);
     });
   }
@@ -12373,63 +12442,6 @@ select.ie-in{width:auto}
     var s = 0, k = 0, i;
     for (i = 0; i < mask.length && i < z.length; i++) if (mask[i]) { s += z[i]; k++; }
     return k ? s / k : 0;
-  }
-  function autoMix() {
-    if (st.exporting || st.playing || st.recording || st.recPending) { setStatus('Arrête la lecture ou l’enregistrement avant d’équilibrer.', true); return; }
-    var R = balRoles(), end = projectEnd(), sr = 44100, list = [], skipped = [];
-    if (!R.voice || !clipsOf(R.voice.id).length) { setStatus('Équilibrage : enregistre d’abord une voix.', true); return; }
-    [R.voice, R.beat, R.dbl, R.adlib].concat(R.harm).forEach(function (t) {
-      if (!t || list.indexOf(t) >= 0 || !clipsOf(t.id).length) return;
-      if (t.muted) { skipped.push(t.name + ' (coupée)'); return; }
-      if (t.auto && t.auto.vol && t.auto.vol.length) { skipped.push(t.name + ' (automation de volume)'); return; }
-      list.push(t);
-    });
-    if (list.indexOf(R.voice) < 0) { setStatus('Équilibrage : la voix est coupée ou automatisée.', true); return; }
-    st.exporting = true;
-    setStatus('Équilibrage : mesure des pistes…');
-    var res = {}, chain = Promise.resolve();
-    list.forEach(function (t) {
-      chain = chain.then(function () { return measureTrack(t, end, sr).then(function (z) { res[t.id] = z; }); });
-    });
-    chain.then(function () {
-      st.exporting = false;
-      var V = R.voice, vz = res[V.id], vs = gateStats(vz), mask = vs.mask, LvInt = vs.lufs, changes = [], beatTxt = '', mV = meanOn(vz, mask), vBase = V.db;
-      // Beat : voix − beat = +2 dB sur les passages chantés. Le beat garde son fader ; la voix monte ou descend.
-      // Si la voix devait dépasser +6 dB, elle reste à +6 dB et c'est le beat qui baisse.
-      if (R.beat && res[R.beat.id]) {
-        var mB = meanOn(res[R.beat.id], mask);
-        if (mV > 0 && mB > 0) {
-          var d = 10 * Math.log10(mV) - 10 * Math.log10(mB), vNew = R.beat.db + 2 - d;
-          if (vNew > 6) { vNew = 6; changes.push([R.beat, clamp(4 + d, -60, 6)]); }
-          vBase = clamp(vNew, -60, 6);
-          changes.push([V, vBase]);
-          beatTxt = 'voix − beat +2,0 dB sur les passages chantés';
-        }
-      }
-      // Doubles, ad-libs, harmonies : écart visé sous la voix (intégrée sur leurs propres passages)
-      function rel(t, off) {
-        var li = gateStats(res[t.id]).lufs;
-        if (!isFinite(li) || !isFinite(LvInt)) return;
-        changes.push([t, clamp(vBase + LvInt - off - li, -60, 6)]);
-      }
-      if (R.dbl && res[R.dbl.id]) rel(R.dbl, BAL_OFF.dbl);
-      if (R.adlib && res[R.adlib.id]) rel(R.adlib, BAL_OFF.adlib);
-      R.harm.forEach(function (h) { if (res[h.id]) rel(h, BAL_OFF.harm); });
-      if (!changes.length) { setStatus('Équilibrage : rien à régler (pistes silencieuses).', true); return; }
-      changes.forEach(function (ch) { ch[0].db = ch[1]; });
-      applyMixLive();
-      renderAll();
-      pushHistory(BAL_LABEL);
-      var parts = [];
-      if (beatTxt) parts.push(beatTxt);
-      if (R.dbl && res[R.dbl.id]) parts.push('doubles −6 dB');
-      if (R.adlib && res[R.adlib.id]) parts.push('ad-libs −4 dB');
-      if (R.harm.length) parts.push('harmonies −8 dB');
-      setStatus('Équilibrage appliqué : ' + parts.join(' ; ') + ' (par rapport à la voix)' + (skipped.length ? '. Non traité : ' + skipped.join(', ') : '') + '.');
-    }).catch(function (err) {
-      st.exporting = false;
-      setStatus('Équilibrage échoué : ' + ((err && err.message) || err), true);
-    });
   }
   var CRC_T = null;
   function crc32(u8) {
@@ -12500,7 +12512,7 @@ select.ie-in{width:auto}
     st.root = rootEl;
     rootEl.innerHTML = '';
     var style = el('style');
-    style.textContent = CSS + '\n' + CSS_SYNC + '\n' + CSS_CAB + '\n' + CSS_TUNE;
+    style.textContent = CSS + '\n' + CSS_SYNC + '\n' + CSS_CAB + '\n' + CSS_TUNE + '\n' + CSS_V4;
     rootEl.appendChild(style);
     var wrap = el('div', 'as-root');
     rootEl.appendChild(wrap);
@@ -12596,7 +12608,7 @@ select.ie-in{width:auto}
     }
     // Attaques de la voix : pics de flux au-dessus d'un seuil adaptatif (médiane mobile x 1,6), écart min 80 ms,
     // porte de silence (-40 dB sous la crête), moment d'attaque affiné par la pente de l'enveloppe.
-    function attacks(x, sr) {
+    function attacks(x, sr, sens) {
       var A = frames(x), F = A.flux, DB = A.db, nF = A.n, i, j, pk = -200, mx = 0;
       for (i = 0; i < nF; i++) { if (DB[i] > pk) pk = DB[i]; if (F[i] > mx) mx = F[i]; }
       var gate = Math.max(-55, pk - 40), W = Math.max(4, Math.round(0.25 * sr / HOP)), eps = 0.04 * mx + 1e-9;
@@ -12605,7 +12617,7 @@ select.ie-in{width:auto}
         var a = Math.max(0, i - W), b = Math.min(nF - 1, i + W), m = 0;
         for (j = a; j <= b; j++) tmp[m++] = F[j];
         tmp.subarray(0, m).sort();
-        thr[i] = 1.6 * tmp[m >> 1] + eps;
+        thr[i] = (2.4 - 1.6 * clampN(sens == null ? 50 : sens, 0, 100) / 100) * tmp[m >> 1] + eps;
       }
       var gap = Math.max(1, Math.round(0.08 * sr / HOP)), list = [], LM = 6, R100 = Math.max(1, Math.round(0.1 * sr / HOP));
       for (i = LM; i < nF - LM; i++) {
@@ -12702,38 +12714,60 @@ select.ie-in{width:auto}
       if (prog) prog(1);
       return { bpm: pick.b, ph: toSec(pick.b, pick), conf: pick.s / sd };
     }
-    // Rendu : décalage global, quantification des attaques, étirement WSOLA par segment (hauteur conservée)
+    // Rendu : décalage global, quantification des attaques, étirement WSOLA par segment (hauteur conservée).
+    // Paramètres optionnels : span (portée max, ms), laid (groove : décalage de la cible, ms, négatif = en avance),
+    // keepOff (seul le décalage global est corrigé), man (cibles manuelles, NaN = automatique), G (grille suivie,
+    // temps triés), yEnd (fin de sortie en s : étirement global sans attaques)
     function render(m, prog) {
       var ch = m.ch, sr = m.sr, nc = ch.length, L = ch[0].length, i, c, j, q;
-      var att = m.att, wk = m.wk, s = m.s, ph = m.ph, sw = m.sw || 0, F = m.force / 100, tol = m.tol / 1000, nA = att.length;
+      var att = m.att, wk = m.wk, s = m.s || 1, ph = m.ph || 0, sw = m.sw || 0, F = m.force / 100, tol = m.tol / 1000, nA = att.length;
+      var span = m.span != null ? m.span / 1000 : Infinity, lay = (m.laid || 0) / 1000, keepOff = !!m.keepOff, man = m.man || null, G = m.G || null;
+      var sd = m.sd || s, Gd = m.Gb || G; // décalage global : période du temps (et temps détectés si suivi)
+      var Lout = m.yEnd != null ? Math.max(1, Math.round(m.yEnd * sr)) : L;
       var mono = mixOf(ch);
-      // 1) décalage global d (±250 ms), défini modulo la subdivision (on préfère le plus petit |d|)
+      // 1) décalage global d (±250 ms) : suivi de grille = médiane des écarts ; grille uniforme = phase moyenne
       var d = 0, bestV = -1e300, wsum = 0;
       for (i = 0; i < nA; i++) wsum += wk[i];
-      if (wsum > 0) {
+      if (wsum > 0 && !Gd) {
         for (q = -250; q <= 250; q++) {
           var dd = q / 1000, sum = 0;
-          for (i = 0; i < nA; i++) if (wk[i]) sum += Math.cos(TAU * (att[i] + dd - ph) / s);
-          var v = sum / wsum - 0.1 * Math.abs(dd) / s;
+          for (i = 0; i < nA; i++) if (wk[i]) sum += Math.cos(TAU * (att[i] + dd - ph - lay) / sd);
+          var v = sum / wsum - 0.1 * Math.abs(dd) / sd;
           if (v > bestV) { bestV = v; d = dd; }
         }
+      } else if (wsum > 0 && Gd) {
+        var resid = [];
+        for (i = 0; i < nA; i++) if (wk[i]) { var ng = nearA(Gd, att[i] - lay) + lay - att[i]; if (Math.abs(ng) <= sd / 2) resid.push(ng); }
+        if (resid.length) { resid.sort(function (a, b) { return a - b; }); d = clampN(resid[resid.length >> 1], -0.25, 0.25); }
       }
-      // 2) grille : point le plus proche (avec swing sur les temps impairs)
-      function near(u) {
+      // 2) grille : point le plus proche (grille uniforme avec swing, ou grille suivie G) ; groove = cible décalée de lay
+      function nearA(A, u) {
+        var lo = 0, hi = A.length - 1, mid;
+        if (u <= A[0]) return A[0];
+        if (u >= A[hi]) return A[hi];
+        while (hi - lo > 1) { mid = (lo + hi) >> 1; if (A[mid] <= u) lo = mid; else hi = mid; }
+        return (u - A[lo] <= A[hi] - u) ? A[lo] : A[hi];
+      }
+      function nearG(u) { return nearA(G, u); }
+      function near(u0) {
+        var u = u0 - lay;
+        if (G) return nearG(u) + lay;
         var k0 = Math.round((u - ph) / s), best = 1e300, bq = u, k, p, dist;
         for (k = k0 - 1; k <= k0 + 1; k++) {
           p = ph + k * s + ((sw > 0 && (k & 1)) ? sw * s : 0);
           dist = Math.abs(p - u);
           if (dist < best) { best = dist; bq = p; }
         }
-        return bq;
+        return bq + lay;
       }
+      var maxMove = Math.min(s / 2, span);
       var y = new Float64Array(nA), mv = new Float64Array(nA), eb = 0, ea = 0, nb = 0, nm = 0, last = -1e300;
       for (i = 0; i < nA; i++) {
         var u = att[i] + d, off = near(u) - u, mvv = 0;
         if (wk[i]) {
           nb++; eb += Math.abs(off);
-          if (Math.abs(off) >= tol && Math.abs(off) <= s / 2) { mvv = off * F; if (mvv !== 0) nm++; }
+          if (man && isFinite(man[i])) { mvv = man[i] - u; if (mvv !== 0) nm++; }
+          else if (!keepOff && Math.abs(off) >= tol && Math.abs(off) <= maxMove) { mvv = off * F; if (mvv !== 0) nm++; }
         }
         var yy = u + mvv;
         if (yy < last + 0.001) yy = last + 0.001; // ordre conservé
@@ -12744,9 +12778,9 @@ select.ie-in{width:auto}
       var X = new Float64Array(nA + 2), Y = new Float64Array(nA + 2);
       X[0] = 0; Y[0] = d;
       for (i = 0; i < nA; i++) { X[i + 1] = att[i]; Y[i + 1] = y[i]; }
-      X[nA + 1] = L / sr; Y[nA + 1] = L / sr + d;
+      X[nA + 1] = L / sr; Y[nA + 1] = m.yEnd != null ? m.yEnd : L / sr + d;
       var outC = [];
-      for (c = 0; c < nc; c++) outC.push(new Float32Array(L));
+      for (c = 0; c < nc; c++) outC.push(new Float32Array(Lout));
       // WSOLA : fenêtre 30 ms (Hann), recouvrement 50 %, recherche ±10 ms
       var N = 2 * Math.round(0.015 * sr), Hs = N / 2, SM = Math.round(0.010 * sr), hann = new Float64Array(N), w0 = new Float64Array(N);
       for (i = 0; i < N; i++) { hann[i] = 0.5 - 0.5 * Math.cos(TAU * i / N); w0[i] = i < Hs ? 1 : hann[i]; }
@@ -12822,12 +12856,57 @@ select.ie-in{width:auto}
           fades(seg, Lo, nf);
           for (c = 0; c < nc; c++) {
             var og = outC[c], sg = seg[c];
-            for (j = 0; j < Lo; j++) { var idx = ys + j; if (idx >= 0 && idx < L) og[idx] = sg[j]; }
+            for (j = 0; j < Lo; j++) { var idx = ys + j; if (idx >= 0 && idx < Lout) og[idx] = sg[j]; }
           }
         }
         if (prog && (sI & 7) === 0) prog(0.1 + 0.9 * sI / nSeg);
       }
       return { ch: outC, d: d, eb: nb ? eb / nb : 0, ea: nb ? ea / nb : 0, nb: nb, nm: nm, y: y, mv: mv };
+    }
+    // Étirement (WSOLA par étapes de 0,77 à 1,3) puis rééchantillonnage linéaire : a = durée de sortie / durée d'entrée
+    // hauteur = f (rééchantillonnage b = f, étirement a = f / t) ; ici : a = étirement total, b = facteur de hauteur
+    function stretchRun(ch, sr, a, b, prog) {
+      var L = ch[0].length, nst = Math.max(1, Math.ceil(Math.abs(Math.log(a)) / Math.log(1.3) - 1e-9)), fs = Math.pow(a, 1 / nst), cur = ch, Lc = L, k, r, out = [], c, n2, i, p, i0, fr, o;
+      for (k = 0; k < nst; k++) {
+        r = render({ ch: cur, sr: sr, att: new Float64Array(0), wk: new Uint8Array(0), s: 1, ph: 0, sw: 0, force: 0, tol: 0, yEnd: Lc / sr * fs },
+          function (q) { if (prog) prog((k + q) / nst); });
+        cur = r.ch; Lc = cur[0].length;
+      }
+      if (Math.abs(b - 1) < 1e-9) return cur;
+      n2 = Math.max(1, Math.floor((Lc - 1) / b) + 1);
+      for (c = 0; c < cur.length; c++) {
+        o = new Float32Array(n2);
+        for (i = 0; i < n2; i++) { p = i * b; i0 = Math.floor(p); fr = p - i0; o[i] = i0 + 1 < Lc ? cur[c][i0] * (1 - fr) + cur[c][i0 + 1] * fr : cur[c][Math.min(i0, Lc - 1)]; }
+        out.push(o);
+      }
+      return out;
+    }
+    // Suivi de beat (Ellis 2007) : programmation dynamique sur la fonction d'attaque de l'instru.
+    // Score C(i) = o(i) + max_j [C(j) - tight · (log((i-j)/P))²], P = période attendue (trames), j dans [P/2 ; 2P]
+    function beatTrack(x, sr, bpm, tight) {
+      var A = frames(x), F = A.flux, n = A.n, fr = sr / HOP, i, j, mean = 0, P = 60 * fr / bpm, lam = tight, dlt, sc, best, bj, lo = Math.max(1, Math.floor(0.5 * P)), hi = Math.round(2 * P);
+      for (i = 0; i < n; i++) mean += F[i];
+      mean = mean / Math.max(1, n) || 1;
+      var C = new Float64Array(n), B = new Int32Array(n), o = new Float64Array(n);
+      for (i = 0; i < n; i++) o[i] = F[i] / mean;
+      for (i = 0; i < n; i++) {
+        best = -1e300; bj = -1;
+        for (dlt = lo; dlt <= hi && dlt <= i; dlt++) {
+          j = i - dlt;
+          sc = C[j] - lam * Math.pow(Math.log(dlt / P), 2);
+          if (sc > best) { best = sc; bj = j; }
+        }
+        if (bj < 0) { C[i] = o[i]; B[i] = -1; }
+        else { C[i] = o[i] + best; B[i] = bj; }
+      }
+      var end = n - 1, bestE = -1e300;
+      for (i = Math.max(0, n - Math.round(1.5 * P)); i < n; i++) if (C[i] > bestE) { bestE = C[i]; end = i; }
+      var fl = [], cur = end;
+      while (cur >= 0) { fl.push(cur); cur = B[cur]; }
+      fl.reverse();
+      var out = new Float64Array(fl.length);
+      for (i = 0; i < fl.length; i++) out[i] = (fl[i] * HOP + NF / 2) / sr;
+      return out;
     }
     // ----- Tonalité : chromagramme (FFT 4096, saut 2048, pondération log) + profils de Krumhansl–Kessler -----
     var KK_MAJ = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
@@ -13054,7 +13133,7 @@ select.ie-in{width:auto}
     function run(m, prog) {
       prog = prog || function () {};
       if (m.op === 'voice') {
-        var a = attacks(mixOf(m.ch), m.sr);
+        var a = attacks(mixOf(m.ch), m.sr, m.sens);
         return { res: { att: a.att, wk: a.wk, n: a.att.length }, transfer: [a.att.buffer, a.wk.buffer] };
       }
       if (m.op === 'instru') {
@@ -13064,6 +13143,14 @@ select.ie-in{width:auto}
       if (m.op === 'render') {
         var o = render(m, prog);
         return { res: o, transfer: o.ch.map(function (cc) { return cc.buffer; }).concat([o.y.buffer, o.mv.buffer]) };
+      }
+      if (m.op === 'stretch') {
+        var sc = stretchRun(m.ch, m.sr, m.a, m.b || 1, prog);
+        return { res: { ch: sc }, transfer: sc.map(function (cc) { return cc.buffer; }) };
+      }
+      if (m.op === 'beats') {
+        var bt = beatTrack(mixOf(m.ch), m.sr, m.bpm, m.tight == null ? 100 : m.tight);
+        return { res: bt, transfer: [bt.buffer] };
       }
       if (m.op === 'key') {
         return { res: keyOf(mixOf(m.ch), m.sr), transfer: [] };
@@ -13080,7 +13167,9 @@ select.ie-in{width:auto}
   // ---------- Recalage : état, travail en tâche, analyse, rendu, application ----------
   var SY = { open: false, src: null, ch: null, sr: 44100, dur: 0, ic: null, bpm: 120, t0: 0, ph: 0, conf: 0,
     vox: null, out: null, grid: '1/8', force: 70, swing: 0, tol: 15, busy: '', prog: 0,
-    play: null, t0ctx: 0, ab: 'after', rt: null, timer: null, haveVox: false, haveGrid: false, ui: null, pk: {} };
+    play: null, t0ctx: 0, ab: 'after', rt: null, timer: null, haveVox: false, haveGrid: false, ui: null, pk: {},
+    span: 150, laid: 0, groove: 'droit', keepOff: false, sens: 50, breath: true, track: 'auto', fixL: [], addL: [], delL: [], tgtL: [],
+    beatsRel: null, trackOn: false, trackMax: 0, eff: null, preset: null, cvD: null, lastTap: null, sensT: null };
   var SY_GF = { '1/4': 1, '1/8': 2, '1/16': 4, '1/8T': 3 };
   var SY_GL = [['1/4', '1/4'], ['1/8', '1/8'], ['1/16', '1/16'], ['1/8T', '1/8T']];
   var SY_JOB = {}, SY_LAST = {}, SY_SEQ = 0, SY_W = null, SY_WBAD = false, SY_ENG = null;
@@ -13171,38 +13260,6 @@ select.ie-in{width:auto}
     return { s: s, ph: pmod(SY.t0 - base, s), sw: (SY.grid === '1/8' || SY.grid === '1/16') ? SY.swing / 100 : 0 };
   }
   // Temps des points de grille (en secondes de la prise), pour l'affichage
-  function gridTimes(dur) {
-    var g = syncGrid(), out = [], k0 = Math.floor(-g.ph / g.s) - 1, k, base, t;
-    for (k = k0; ; k++) {
-      base = g.ph + k * g.s;
-      if (base > dur) break;
-      t = base + ((g.sw > 0 && (k & 1)) ? g.sw * g.s : 0);
-      if (t >= 0 && t <= dur) out.push(t);
-    }
-    return out;
-  }
-  function openSync(src, quiet) {
-    if (st.recording || st.recPending) { setStatus('Termine l’enregistrement avant de recaler.', true); return; }
-    if (!src || !src.buffer) { setStatus('Sélectionne une prise ou un clip à recaler.', true); return; }
-    stopSync();
-    var b = src.buffer, sr = b.sampleRate, s0 = Math.max(0, Math.round(src.offset * sr));
-    var n = Math.min(b.length - s0, Math.round(src.duration * sr));
-    if (n < sr * 0.5) { setStatus('Prise trop courte pour être recalée.', true); return; }
-    SY.src = src; SY.sr = sr; SY.dur = n / sr; SY.out = null; SY.vox = null; SY.ab = 'after';
-    SY.ch = [];
-    for (var c = 0; c < Math.min(2, b.numberOfChannels); c++) SY.ch.push(b.getChannelData(c).slice(s0, s0 + n));
-    if (SY.ch.length === 1) SY.ch.push(SY.ch[0].slice());
-    SY.pk = {};
-    var tr = instruTrack();
-    SY.ic = tr ? firstClipOf(tr) : null;
-    SY.bpm = st.bpm;
-    SY.haveVox = false; SY.haveGrid = !SY.ic; SY.t0 = 0; SY.ph = 0;
-    SY.open = true;
-    if (SY.ui && !quiet) SY.ui.ov.hidden = false;
-    syncAnalyzeVoice();
-    syncAnalyzeInstru(false);
-    renderSync();
-  }
   function closeSync() {
     SY.hook = null;
     stopSync();
@@ -13210,54 +13267,11 @@ select.ie-in{width:auto}
     SY.open = false;
     if (SY.ui) SY.ui.ov.hidden = true;
   }
-  function syncAnalyzeVoice() {
-    var m = { ch: SY.ch.map(function (c) { return new Float32Array(c); }), sr: SY.sr };
-    var tr = m.ch.map(function (c) { return c.buffer; });
-    syncRun('voice', 'voice', m, tr, 'Analyse des attaques de la voix…', function (r) {
-      if (!SY.open) return;
-      SY.vox = { att: r.att, wk: r.wk, n: r.n };
-      SY.haveVox = true;
-      syncRequestRender();
-    });
-  }
   // Tempo (full = recherche 70-180 BPM) ou phase seule au tempo courant
-  function syncAnalyzeInstru(full) {
-    var ic = SY.ic;
-    if (!ic) { SY.t0 = 0; SY.haveGrid = true; syncRequestRender(); renderSync(); return; }
-    var b = ic.buffer, sr = b.sampleRate, s0 = Math.round(ic.offset * sr);
-    var n = Math.min(b.length - s0, Math.round(Math.min(ic.duration, 120) * sr));
-    var L = b.getChannelData(0).slice(s0, s0 + n);
-    var m = { ch: [L], sr: sr, bpm: full ? 0 : SY.bpm };
-    syncRun('instru', 'instru', m, [L.buffer], full ? 'Détection du tempo de l’instru…' : 'Recherche du premier temps…', function (r) {
-      if (!SY.open) return;
-      if (full) SY.bpm = Math.round(r.bpm * 10) / 10;
-      SY.ph = r.ph;
-      SY.t0 = ic.start + r.ph;
-      SY.conf = r.conf;
-      SY.haveGrid = true;
-      syncRequestRender();
-    });
-  }
   function syncRequestRender() {
     if (!SY.open) return;
     clearTimeout(SY.rt);
     SY.rt = setTimeout(syncRenderNow, 120);
-  }
-  function syncRenderNow() {
-    SY.rt = null;
-    if (!SY.open || !SY.haveVox || !SY.haveGrid || !SY.vox) return;
-    var g = syncGrid();
-    var m = { ch: SY.ch.map(function (c) { return new Float32Array(c); }), sr: SY.sr, att: new Float64Array(SY.vox.att),
-      wk: new Uint8Array(SY.vox.wk), s: g.s, ph: g.ph, sw: g.sw, force: SY.force, tol: SY.tol };
-    var tr = m.ch.map(function (c) { return c.buffer; }).concat([m.att.buffer, m.wk.buffer]);
-    syncRun('render', 'render', m, tr, 'Calcul du recalage…', function (r) {
-      if (!SY.open) return;
-      var ctx = getCtx(), L = r.ch[0].length, buf = ctx.createBuffer(2, L, SY.sr);
-      buf.copyToChannel(r.ch[0], 0); buf.copyToChannel(r.ch[1] || r.ch[0], 1);
-      SY.out = { buf: buf, info: r };
-      SY.pk.A = null;
-      if (SY.hook) { var hk = SY.hook; SY.hook = null; hk(); }
-    });
   }
   // Sources : prise (Mes prises) ou clip sélectionné (Édition)
   function syncSrcTake(tk) {
@@ -13380,6 +13394,791 @@ select.ie-in{width:auto}
     }
   }
   // Canevas : haut = prise d'origine + attaques (violet) ; bas = recalée + nouvelles attaques (cyan) ; traits = déplacements
+  // Met à jour toute la feuille de recalage
+  // Feuille « Recaler sur le temps » (créée une fois, masquée)
+  function syncSlider(parent, label, min, max, step, onInput, fmt) {
+    var wrap = el('span', 'as-sync-sl');
+    wrap.appendChild(lbl(label));
+    var r = inp('range', 'as-srange');
+    r.min = min; r.max = max; r.step = step;
+    var v = el('span', 'as-sval', '');
+    r.addEventListener('input', function () { v.textContent = fmt(+r.value); onInput(+r.value); });
+    wrap.appendChild(r); wrap.appendChild(v);
+    parent.appendChild(wrap);
+    return { r: r, v: v, wrap: wrap };
+  }
+
+  // Styles de la Cabine v4 (mini-timeline, barre d'actions, feuille « Modifier l’instru », mixage auto)
+  var CSS_V4 = [
+    '.as-sync-row>.as-sgrid,.as-sync-row>.as-sab{flex:1 1 auto;min-width:0;max-width:100%;width:auto;min-height:40px;white-space:normal;text-align:center;line-height:1.15;}',
+    '.as-tlz{gap:8px;padding:10px 10px 12px;}',
+    '.as-tl-hb{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}',
+    '.as-tl-hb .as-btn,.as-tl-hb .as-cbtn{min-height:36px;}',
+    '.as-tl-time{font:600 12px var(--mono,ui-monospace,monospace);color:var(--muted,#9d95b8);font-variant-numeric:tabular-nums;margin-left:auto;margin-right:6px;}',
+    '.as-tl-scroll{position:relative;overflow-x:auto;overflow-y:hidden;touch-action:pan-x;-webkit-overflow-scrolling:touch;scrollbar-width:thin;border-radius:10px;background:rgba(0,0,0,.24);border:1px solid var(--border,rgba(255,255,255,.08));height:auto;}',
+    '.as-tl-cont{position:relative;min-height:100%;}',
+    '.as-tl-row{display:flex;align-items:stretch;position:relative;}',
+    '.as-tl-lab{position:sticky;left:0;z-index:3;flex:0 0 76px;width:76px;box-sizing:border-box;padding:4px 6px;display:flex;flex-direction:column;justify-content:center;gap:1px;background:rgba(21,18,35,.97);border-right:1px solid var(--border2,rgba(255,255,255,.16));font-size:11px;font-weight:700;color:var(--text,#efecf8);overflow:hidden;}',
+    '.as-tl-lab-s{font-size:10px;font-weight:500;color:var(--muted,#9d95b8);white-space:nowrap;}',
+    '.as-tl-lane{position:relative;flex:none;box-sizing:border-box;border-bottom:1px solid rgba(255,255,255,.05);}',
+    '.as-tl-ruler{height:22px;}',
+    '.as-tl-mn{position:absolute;top:0;bottom:0;padding-left:4px;border-left:1px solid rgba(255,255,255,.22);font:600 10px var(--mono,ui-monospace,monospace);color:var(--muted,#9d95b8);line-height:22px;}',
+    '.as-tl-beat,.as-tl-vox{background-color:rgba(255,255,255,.012);}',
+    '.as-tl-blk{position:absolute;top:3px;bottom:3px;box-sizing:border-box;min-width:8px;border-radius:8px;overflow:hidden;touch-action:none;cursor:grab;background:linear-gradient(180deg,rgba(168,85,247,.55),rgba(168,85,247,.26));border:1px solid rgba(192,132,252,.75);}',
+    '.as-tl-blk.beat{background:linear-gradient(180deg,rgba(34,211,238,.42),rgba(34,211,238,.14));border-color:rgba(34,211,238,.8);}',
+    '.as-tl-blk.on{border-color:#fff;box-shadow:0 0 0 1px #fff,0 0 14px rgba(255,255,255,.35);}',
+    '.as-tl-cv{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;}',
+    '.as-tl-nm{position:absolute;left:7px;top:2px;font-size:10px;font-weight:700;color:#fff;text-shadow:0 1px 2px #000;white-space:nowrap;pointer-events:none;max-width:calc(100% - 14px);overflow:hidden;text-overflow:ellipsis;}',
+    '.as-tl-h{position:absolute;top:0;bottom:0;width:16px;touch-action:none;cursor:ew-resize;z-index:2;}',
+    '.as-tl-h.l{left:0;background:linear-gradient(90deg,rgba(255,255,255,.55),rgba(255,255,255,0));border-radius:8px 0 0 8px;}',
+    '.as-tl-h.r{right:0;background:linear-gradient(270deg,rgba(255,255,255,.55),rgba(255,255,255,0));border-radius:0 8px 8px 0;}',
+    '.as-tl-ph{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:#fff;box-shadow:0 0 8px #fff;pointer-events:none;z-index:4;}',
+    '.as-tl-act{display:flex;align-items:center;gap:8px;overflow-x:auto;scrollbar-width:none;padding:2px 0;min-height:44px;}',
+    '.as-tl-act::-webkit-scrollbar{display:none;}',
+    '.as-tl-act .as-tl-hint{font-size:12px;color:var(--muted,#9d95b8);padding:6px 2px;}',
+    '.as-tl-grp{display:flex;align-items:center;gap:6px;flex:none;padding-right:8px;border-right:1px solid var(--border,rgba(255,255,255,.08));}',
+    '.as-tl-grp:last-child{border-right:none;}',
+    '.as-tl-gl{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted,#9d95b8);white-space:nowrap;}',
+    '.as-tl-act .as-cbtn{min-height:40px;padding:0 10px;}',
+    '.as-tl-act .as-cbtn.as-tl-prim{background:linear-gradient(135deg,rgba(34,211,238,.28),rgba(168,85,247,.22));border-color:rgba(34,211,238,.6);}',
+    '.as-tl-b{min-height:40px;min-width:48px;padding:0 8px;border-radius:var(--radius-sm,9px);border:1px solid var(--border,rgba(255,255,255,.08));background:var(--panel2,#241e38);color:var(--text,#efecf8);font:600 12px var(--font,system-ui);cursor:pointer;white-space:nowrap;}',
+    '.as-tl-chip{min-height:40px;white-space:nowrap;}',
+    '.as-tl-panel{display:flex;flex-direction:column;gap:6px;padding:8px 10px;border-radius:var(--radius-sm,9px);background:var(--panel2,#241e38);border:1px solid var(--border,rgba(255,255,255,.08));}',
+    '.as-tl-panel[hidden]{display:none !important;}',
+    '.as-tl-chips{display:flex;flex-wrap:wrap;gap:6px;}',
+    '.as-st-h{min-width:40px;}',
+    '.as-tlz .as-zone-cv{display:none;}',
+    '@media (max-width:820px){.as-tl-scroll{height:auto;}.as-tl-h{width:18px;}.as-tl-b{min-height:44px;}.as-tl-act .as-cbtn{min-height:44px;}.as-tl-hb .as-btn,.as-tl-hb .as-cbtn{min-height:44px;min-width:44px;}.as-tl-blk{top:2px;bottom:2px;min-height:44px;}.as-st-top .as-cbtn>span{display:none;}}',
+    '@media (pointer:coarse){.as-tl-chip{min-height:44px;}}'
+  ].join('\n');
+
+  // ---------- Cabine v4 : mini-timeline tactile (beat + couches de voix), barre d'actions, « Modifier l'instru » ----------
+  var TL_LBL = 76, TL_RULER_H = 22, TL_BEAT_H = 56, TL_VOX_H = 48;   // colonne d'étiquettes (px), hauteurs des voies
+  var TL_LAYERS = [['main', 'Principale'], ['dbl', 'Double'], ['adlib', 'Ad-libs'], ['harm', 'Harmonies']];
+  var TL = { pps: 0, snap: false, sel: null, panel: null, drag: null, ptrs: {}, pinch: null, follow: true, sig: '', dragEnd: 0 };
+  var IE_TOK = 0, IE_UI = { loopBar: 1, loopN: 4, loopX: 2 };
+  function tlLaneTrack(kind) {
+    var i, t;
+    if (kind === 'main') return voiceTrack();
+    for (i = 0; i < st.tracks.length; i++) {
+      t = st.tracks[i];
+      if (t.type === 'aux') continue;
+      if (kind === 'harm' ? t.name.indexOf('Harmonie') === 0 : LAYER_TRK[kind] === t.name) return t;
+    }
+    return null;
+  }
+  function tlWidth() { var s = st.ui.tlScroll; return s && s.clientWidth > 120 ? s.clientWidth : 360; }
+  function tlTotal() { return Math.max(projectEnd(), 4 * 240 / st.bpm) + 2; }
+  function tlBarS() { return 240 / st.bpm; }
+  function tlBeatS() { return 60 / st.bpm; }
+  function tlSnapT(t) { if (!TL.snap) return t; var q = tlBeatS(); return Math.max(0, Math.round(t / q) * q); }
+  function tlSelClip() { return TL.sel && TL.sel.kind === 'clip' ? findClip(TL.sel.id) : null; }
+  function tlTakeName(c) { var tk = c.takeId ? takeById(c.takeId) : null; return tk ? 'Prise ' + tk.num : (c.name || 'Clip'); }
+  // Zoom centré sur le milieu de la vue
+  function tlZoom(f) { tlSetPps(TL.pps * f); }
+  function tlSetPps(v) {
+    var u = st.ui, W = tlWidth(), tc = (u.tlScroll.scrollLeft + W / 2 - TL_LBL) / TL.pps;
+    TL.pps = clamp(v, 12, 480);
+    renderTimeline(true);
+    u.tlScroll.scrollLeft = Math.max(0, TL_LBL + tc * TL.pps - W / 2);
+  }
+  // Pincement à deux doigts : zoom ; un seul doigt : glisser le bloc ou faire défiler
+  function tlPtrDown(e) {
+    TL.ptrs[e.pointerId] = { x: e.clientX, y: e.clientY };
+    var ks = Object.keys(TL.ptrs);
+    if (ks.length === 2) {
+      var a = TL.ptrs[ks[0]], b = TL.ptrs[ks[1]];
+      TL.pinch = { d0: Math.hypot(a.x - b.x, a.y - b.y) || 1, pps0: TL.pps };
+      if (TL.drag) { TL.drag.moved = false; TL.drag.mode = 'none'; }
+    }
+  }
+  function tlPtrMove(e) {
+    var p = TL.ptrs[e.pointerId];
+    if (!p) return;
+    p.x = e.clientX; p.y = e.clientY;
+    var ks = Object.keys(TL.ptrs);
+    if (TL.pinch && ks.length === 2) {
+      var a = TL.ptrs[ks[0]], b = TL.ptrs[ks[1]], d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+      var want = TL.pinch.pps0 * d / TL.pinch.d0;
+      if (Math.abs(want - TL.pps) > 0.5) tlSetPps(want);
+    }
+  }
+  function tlPtrUp(e) {
+    delete TL.ptrs[e.pointerId];
+    if (Object.keys(TL.ptrs).length < 2) TL.pinch = null;
+  }
+  // Dessin d'un segment de buffer (min/max par colonne) dans un canevas
+  function drawSeg(cv, buf, off, dur, W, H, rgb) {
+    cv.width = Math.max(2, Math.round(W)); cv.height = H;
+    var g = cv.getContext('2d'), p = getPeaks(buf), sr = buf.sampleRate, mid = H / 2, x, s0, s1, b0, b1, b, mn, mx;
+    g.fillStyle = rgb;
+    for (x = 0; x < cv.width; x++) {
+      s0 = (off + dur * x / cv.width) * sr; s1 = (off + dur * (x + 1) / cv.width) * sr;
+      b0 = clamp(Math.floor(s0 / BUCKET), 0, p.n - 1); b1 = clamp(Math.max(b0 + 1, Math.floor(s1 / BUCKET)), b0 + 1, p.n);
+      mn = 0; mx = 0;
+      for (b = b0; b < b1; b++) { if (p.mins[b] < mn) mn = p.mins[b]; if (p.maxs[b] > mx) mx = p.maxs[b]; }
+      g.fillRect(x, mid - clamp(mx, 0, 1) * mid * 0.92, 1, Math.max(1, (clamp(mx, 0, 1) - clamp(mn, -1, 0)) * mid * 0.92));
+    }
+  }
+  // Écran : place le bloc, dessine sa forme d'onde, gère les poignées (sélection)
+  function tlBlock(lane, c, kind) {
+    var sel = TL.sel && TL.sel.id === c.id, pps = TL.pps;
+    var b = el('div', 'as-tl-blk' + (kind === 'beat' ? ' beat' : (c.takeId ? ' tk' : '')) + (sel ? ' on' : ''));
+    b.style.left = (c.start * pps).toFixed(2) + 'px';
+    b.style.width = Math.max(8, c.duration * pps).toFixed(2) + 'px';
+    b.setAttribute('role', 'button');
+    b.setAttribute('aria-label', (kind === 'beat' ? 'Beat ' : '') + tlTakeName(c) + (sel ? ', sélectionné' : ''));
+    var cv = el('canvas', 'as-tl-cv');
+    b.appendChild(cv);
+    b.appendChild(el('span', 'as-tl-nm', kind === 'beat' ? (c.name || 'Beat') : tlTakeName(c)));
+    if (sel && kind !== 'beat') {
+      var hl = el('span', 'as-tl-h l'), hr = el('span', 'as-tl-h r');
+      hl.addEventListener('pointerdown', function (e) { tlDown(e, c, kind, 'l'); });
+      hr.addEventListener('pointerdown', function (e) { tlDown(e, c, kind, 'r'); });
+      b.appendChild(hl); b.appendChild(hr);
+    }
+    b.addEventListener('pointerdown', function (e) { tlDown(e, c, kind, 'move'); });
+    lane.appendChild(b);
+    drawSeg(cv, c.buffer, c.offset, c.duration, Math.max(8, c.duration * pps), kind === 'beat' ? TL_BEAT_H : TL_VOX_H, kind === 'beat' ? 'rgba(165,243,252,0.85)' : 'rgba(216,180,254,0.9)');
+    return b;
+  }
+  // Rendu de la mini-timeline (reconstruit seulement si son contenu a changé)
+  function renderTimeline(force) {
+    var u = st.ui;
+    if (!u.tlScroll || !u.tlCont) return;
+    if (!TL.pps) TL.pps = clamp((tlWidth() - TL_LBL) / 8, 16, 120);
+    var pps = TL.pps, T = tlTotal(), bar = tlBarS(), beat = tlBeatS(), k, every, lane, row, lab, tiles;
+    var cs = st.clips.map(function (c) { return [c.id, c.trackId, c.start, c.duration, c.offset, c.gainDb, c.fadeIn, c.fadeOut, c.name, c.takeId || '', bufId(c.buffer)].join('~'); }).join('|');
+    var tr = st.tracks.map(function (t) { return t.id + ':' + t.name; }).join('|');
+    var sig = [pps.toFixed(3), T.toFixed(2), st.bpm, tr, cs, TL.sel ? TL.sel.kind + TL.sel.id : ''].join('#');
+    if (!force && sig === TL.sig) { tlRenderAct(); return; }
+    TL.sig = sig;
+    var cont = u.tlCont;
+    cont.innerHTML = '';
+    cont.style.width = (TL_LBL + T * pps).toFixed(1) + 'px';
+    // Règle : numéros de mesure, densité adaptée au zoom
+    row = el('div', 'as-tl-row');
+    lab = el('div', 'as-tl-lab', 'Mesure'); row.appendChild(lab);
+    lane = el('div', 'as-tl-lane as-tl-ruler'); lane.style.width = (T * pps).toFixed(1) + 'px';
+    every = 1; while (every * bar * pps < 34) every *= 2;
+    for (k = 0; k * bar < T; k += every) {
+      tiles = el('span', 'as-tl-mn', String(k + 1));
+      tiles.style.left = (k * bar * pps).toFixed(2) + 'px';
+      lane.appendChild(tiles);
+    }
+    row.appendChild(lane); cont.appendChild(row);
+    // Voie du beat
+    var instru = instruTrack();
+    var grid = 'background-image:linear-gradient(90deg,rgba(255,255,255,.16) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.05) 1px,transparent 1px);';
+    row = el('div', 'as-tl-row');
+    lab = el('div', 'as-tl-lab', 'Beat');
+    row.appendChild(lab);
+    lane = el('div', 'as-tl-lane as-tl-beat');
+    lane.style.width = (T * pps).toFixed(1) + 'px';
+    lane.style.height = TL_BEAT_H + 'px';
+    lane.style.cssText += grid + 'background-size:' + (bar * pps).toFixed(2) + 'px 100%,' + (beat * pps).toFixed(2) + 'px 100%;';
+    if (instru) clipsOf(instru.id).forEach(function (c) { tlBlock(lane, c, 'beat'); });
+    lane.addEventListener('click', function (e) { if (e.target.closest && e.target.closest('.as-tl-blk')) return; tlLaneTap(e, lane); });
+    row.appendChild(lane); cont.appendChild(row);
+    // Voies des couches de voix
+    TL_LAYERS.forEach(function (d) {
+      var t = tlLaneTrack(d[0]), n = t ? clipsOf(t.id).length : 0;
+      row = el('div', 'as-tl-row');
+      lab = el('div', 'as-tl-lab');
+      lab.appendChild(el('span', 'as-tl-lab-n', d[1]));
+      lab.appendChild(el('span', 'as-tl-lab-s', n ? n + ' bloc' + (n > 1 ? 's' : '') : 'vide'));
+      row.appendChild(lab);
+      lane = el('div', 'as-tl-lane as-tl-vox');
+      lane.style.width = (T * pps).toFixed(1) + 'px';
+      lane.style.height = TL_VOX_H + 'px';
+      lane.style.cssText += grid + 'background-size:' + (bar * pps).toFixed(2) + 'px 100%,' + (beat * pps).toFixed(2) + 'px 100%;';
+      if (t) clipsOf(t.id).sort(function (a, b) { return a.start - b.start; }).forEach(function (c) { tlBlock(lane, c, 'vox'); });
+      lane.addEventListener('click', function (e) { if (e.target.closest && e.target.closest('.as-tl-blk')) return; tlLaneTap(e, lane); });
+      row.appendChild(lane); cont.appendChild(row);
+    });
+    // Tête de lecture (position mise à jour par tlPos)
+    u.tlPh = el('div', 'as-tl-ph');
+    cont.appendChild(u.tlPh);
+    tlPos(currentPos());
+    tlRenderAct();
+  }
+  // Tête de lecture et défilement qui la suit pendant la lecture
+  function tlPos(pos) {
+    var u = st.ui;
+    if (!u.tlPh || !u.tlScroll) return;
+    var x = TL_LBL + pos * TL.pps;
+    u.tlPh.style.left = x.toFixed(1) + 'px';
+    if (u.tlPh.style.height !== '100%') u.tlPh.style.height = '100%';
+    if (st.playing && TL.follow && !TL.drag) {
+      var W = tlWidth(), sl = u.tlScroll.scrollLeft;
+      if (x > sl + W * 0.82 || x < sl + TL_LBL) u.tlScroll.scrollLeft = Math.max(0, x - TL_LBL - W * 0.2);
+    }
+    if (u.tlTime) u.tlTime.textContent = fmtTime(pos, false);
+  }
+  // Toucher une voie vide : place la tête de lecture et désélectionne
+  function tlLaneTap(e, lane) {
+    if (Date.now() - TL.dragEnd < 350) return;
+    var r = lane.getBoundingClientRect(), t = (e.clientX - r.left) / TL.pps;
+    TL.sel = null; TL.panel = null;
+    seek(Math.max(0, t));
+    renderTimeline(true);
+  }
+  // Pointeur : déplacer (glisser le bloc), rogner (poignées), sélection au relâchement
+  function tlDown(e, c, kind, mode) {
+    e.stopPropagation();
+    if (st.recording || st.recPending) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (Object.keys(TL.ptrs).length > 1) return;
+    if (e.cancelable) e.preventDefault();
+    TL.sel = { kind: kind === 'beat' ? 'beat' : 'clip', id: c.id };
+    TL.panel = null;
+    if (kind === 'beat') { TL.drag = null; renderTimeline(true); return; }
+    var lane0 = e.currentTarget && e.currentTarget.parentNode, r0 = lane0 ? lane0.getBoundingClientRect() : null;
+    TL.drag = { mode: mode, clip: c, kind: kind, x0: e.clientX, s0: c.start, o0: c.offset, d0: c.duration, moved: false, pid: e.pointerId, t0: r0 ? (e.clientX - r0.left) / TL.pps : c.start };
+    window.addEventListener('pointermove', tlMove);
+    window.addEventListener('pointerup', tlUp);
+    window.addEventListener('pointercancel', tlUp);
+    renderTimeline(true);
+  }
+  function tlMove(e) {
+    var D = TL.drag;
+    if (!D || e.pointerId !== D.pid) return;
+    var dx = e.clientX - D.x0, dt = dx / TL.pps, c = D.clip;
+    if (!D.moved && Math.abs(dx) < 5) return;
+    D.moved = true;
+    if (D.mode === 'move') c.start = tlSnapT(Math.max(0, D.s0 + dt));
+    else if (D.mode === 'l') { var dd = clamp(dt, Math.max(-D.o0, -D.s0), D.d0 - 0.05); c.start = D.s0 + dd; c.offset = D.o0 + dd; c.duration = D.d0 - dd; }
+    else if (D.mode === 'r') c.duration = clamp(D.d0 + dt, 0.05, Math.max(0.05, c.buffer.duration - c.offset));
+    clampFades(c);
+    renderTimeline(true);
+  }
+  function tlUp(e) {
+    var D = TL.drag;
+    if (D && e && e.pointerId !== D.pid && e.type !== 'pointercancel') return;
+    window.removeEventListener('pointermove', tlMove);
+    window.removeEventListener('pointerup', tlUp);
+    window.removeEventListener('pointercancel', tlUp);
+    if (!D) return;
+    TL.drag = null; TL.dragEnd = Date.now();
+    var c = D.clip;
+    if (!D.moved) { if (D.mode === 'move' && D.kind !== 'beat' && !st.recording) seek(clamp(D.t0, c.start, c.start + c.duration)); renderTimeline(true); return; }
+    if (!findClip(c.id)) { renderTimeline(true); return; }
+    if (c.takeId) { var tk = takeById(c.takeId); if (tk) { tk.start = c.start; if (typeof tk.base === 'number') tk.nudge = Math.round((c.start - tk.base) * 1000); tk.offset = c.offset; tk.duration = c.duration; } }
+    tlResolve(c);
+    var lbl = D.mode === 'move' ? 'Déplacer le bloc' : (D.mode === 'l' ? 'Rogner le début' : 'Rogner la fin');
+    edited(lbl);
+  }
+  // Un bloc déplacé sur une autre prise de la même voie : la prise recouverte passe en réserve
+  function tlResolve(c) {
+    st.clips.slice().forEach(function (o) {
+      if (o === c || o.trackId !== c.trackId || !o.takeId || !c.takeId) return;
+      if (o.start < c.start + c.duration - 1e-6 && c.start < o.start + o.duration - 1e-6) parkTake(o.takeId);
+    });
+  }
+  // Action sur le bloc sélectionné (une seule entrée d'historique par action)
+  function tlNudge(ms) {
+    var c = tlSelClip(); if (!c) return;
+    c.start = Math.max(0, Math.round((c.start + ms / 1000) * 1000) / 1000);
+    var tk = c.takeId ? takeById(c.takeId) : null;
+    if (tk && typeof tk.base === 'number') { tk.start = c.start; tk.nudge = Math.round((c.start - tk.base) * 1000); }
+    tlResolve(c);
+    edited('Décaler de ' + ms + ' ms');
+  }
+  function tlCut() {
+    var c = tlSelClip();
+    if (!c) return;
+    var p = currentPos(), cut = p - c.start;
+    if (cut <= 0.001 || cut >= c.duration - 0.001) { setStatus('Place la tête de lecture à l’intérieur du bloc, puis touche « Couper ici ».', true); return; }
+    var right = { id: uid('c'), trackId: c.trackId, name: c.name + ' (2)', buffer: c.buffer, start: p, offset: c.offset + cut,
+      duration: c.duration - cut, fadeIn: 0, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: null };
+    c.duration = cut; c.fadeOut = 0;
+    clampFades(c); clampFades(right);
+    st.clips.push(right);
+    TL.sel = { kind: 'clip', id: right.id };
+    edited('Couper le bloc');
+  }
+  function tlDup() {
+    var c = tlSelClip(); if (!c) return;
+    var cp = { id: uid('c'), trackId: c.trackId, name: c.name, buffer: c.buffer, start: c.start + c.duration, offset: c.offset,
+      duration: c.duration, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb, curve: c.curve, takeId: null };
+    st.clips.push(cp);
+    TL.sel = { kind: 'clip', id: cp.id };
+    edited('Dupliquer le bloc');
+  }
+  function tlDelete() {
+    var c = tlSelClip(); if (!c) return;
+    if (c.takeId) parkTake(c.takeId);
+    else st.clips = st.clips.filter(function (o) { return o !== c; });
+    TL.sel = null; TL.panel = null;
+    edited('Supprimer le bloc');
+  }
+  // Barre d'actions contextuelle (sous la timeline) et panneau de réglage ouvert par un bouton
+  function tlRenderAct() {
+    var u = st.ui, box = u.tlAct;
+    if (!box) return;
+    box.innerHTML = '';
+    var c = tlSelClip(), isBeat = TL.sel && TL.sel.kind === 'beat', g;
+    if (!c && !isBeat) {
+      box.appendChild(el('div', 'as-tl-hint', 'Touche un bloc pour le modifier. Touche la forme d’onde du beat pour modifier l’instru.'));
+      tlPanelRender(null);
+      return;
+    }
+    if (isBeat) {
+      var ic = instruClip();
+      cbtn(box, 'sliders', 'Modifier l’instru', 'as-tl-prim', openInstru);
+      if (ic) cbtn(box, 'fadein', 'Fondu', '', function () { TL.panel = TL.panel === 'fade' ? null : 'fade'; tlRenderAct(); });
+      if (ic) cbtn(box, 'trash', 'Remplacer le beat', '', function () { u.bFileMode = 'change'; u.bFile.click(); });
+      tlPanelRender(isBeat && ic && TL.panel === 'fade' ? { kind: 'beatfade', c: ic } : null);
+      return;
+    }
+    g = el('div', 'as-tl-grp');
+    g.appendChild(el('span', 'as-tl-gl', 'Déplacer'));
+    tbtn(g, '−10 ms', 'Décaler le bloc de 10 ms vers la gauche', function () { tlNudge(-10); }, 'as-tl-b');
+    tbtn(g, '+10 ms', 'Décaler le bloc de 10 ms vers la droite', function () { tlNudge(10); }, 'as-tl-b');
+    g.appendChild(chip('Aimant', 'Aimanter les blocs à la grille (1 temps)', TL.snap, 'as-tl-chip', function () { TL.snap = !TL.snap; tlRenderAct(); }));
+    box.appendChild(g);
+    g = el('div', 'as-tl-grp');
+    cbtn(g, 'scissors', 'Couper ici', '', tlCut);
+    cbtn(g, 'copy', 'Dupliquer', '', tlDup);
+    cbtn(g, 'volume', 'Volume', '', function () { TL.panel = TL.panel === 'vol' ? null : 'vol'; tlRenderAct(); });
+    cbtn(g, 'fadein', 'Fondu', '', function () { TL.panel = TL.panel === 'fade' ? null : 'fade'; tlRenderAct(); });
+    if (c.takeId) cbtn(g, 'swap', 'Remplacer', '', function () { TL.panel = TL.panel === 'rep' ? null : 'rep'; tlRenderAct(); });
+    cbtn(g, 'clock', 'Recaler', '', function () { openSync(syncSrcClip(c), false); });
+    if (c.takeId) cbtn(g, 'sliders', 'Effets', '', function () { var tk = takeById(c.takeId); if (tk) { st.booth.tkId = tk.id; openTakeSheet(tk, false); } });
+    cbtn(g, 'trash', 'Supprimer', 'danger', tlDelete);
+    box.appendChild(g);
+    tlPanelRender(TL.panel ? { kind: TL.panel, c: c } : null);
+  }
+  // Panneau sous la barre : volume, fondus ou choix d'une autre prise
+  function tlPanelRender(p) {
+    var u = st.ui, box = u.tlPanel;
+    if (!box) return;
+    box.innerHTML = '';
+    box.hidden = !p;
+    if (!p) return;
+    var c = p.c;
+    if (p.kind === 'vol') {
+      var v = vrow(box, 'Volume du bloc', GAIN_MIN, GAIN_MAX, 0.5);
+      v.r.value = c.gainDb || 0; v.v.textContent = dbText(c.gainDb || 0);
+      v.r.addEventListener('input', function () { setClipGain(c, +v.r.value); v.v.textContent = dbText(c.gainDb); });
+      v.r.addEventListener('change', function () { setClipGain(c, +v.r.value); edited('Volume du bloc'); });
+    } else if (p.kind === 'fade' || p.kind === 'beatfade') {
+      var mx = Math.max(0.05, Math.min(6, c.duration / 2));
+      var fi = vrow(box, 'Fondu d’entrée', 0, mx, 0.05), fo = vrow(box, 'Fondu de sortie', 0, mx, 0.05);
+      fi.r.value = clamp(c.fadeIn || 0, 0, mx); fo.r.value = clamp(c.fadeOut || 0, 0, mx);
+      fi.v.textContent = fr1(fi.r.value, 2) + ' s'; fo.v.textContent = fr1(fo.r.value, 2) + ' s';
+      fi.r.addEventListener('input', function () { c.fadeIn = +fi.r.value; clampFades(c); fi.v.textContent = fr1(c.fadeIn, 2) + ' s'; });
+      fo.r.addEventListener('input', function () { c.fadeOut = +fo.r.value; clampFades(c); fo.v.textContent = fr1(c.fadeOut, 2) + ' s'; });
+      fi.r.addEventListener('change', function () { edited('Fondu d’entrée'); });
+      fo.r.addEventListener('change', function () { edited('Fondu de sortie'); });
+    } else if (p.kind === 'rep') {
+      box.appendChild(el('div', 'as-sub', 'Remplacer par une autre prise de cette voie'));
+      var row = el('div', 'as-tl-chips');
+      takesOf(c.trackId).forEach(function (tk) {
+        if (tk.id === c.takeId) return;
+        pchip(row, 'Prise ' + tk.num + (isActive(tk) ? ' · active' : ''), function () {
+          useTake(tk); st.booth.lastId = tk.id; TL.panel = null; edited('Remplacer par la prise ' + tk.num);
+        });
+      });
+      if (!row.childNodes.length) row.appendChild(el('span', 'as-note', 'Aucune autre prise sur cette voie.'));
+      box.appendChild(row);
+    }
+  }
+  // Ouvre la feuille « Modifier l’instru »
+  function openInstru() {
+    var ic = instruClip();
+    if (!ic) { setStatus('Ajoute d’abord un beat.', true); return; }
+    if (st.recording || st.recPending) return;
+    openOv(st.ui.shInstru);
+    renderInstru();
+  }
+  // Réglages de l'instru conservés dans le clip : original, boucle, tempo, tonalité, rognage
+  function ieOf(c) {
+    if (!c.orig) c.orig = c.buffer;
+    if (!c.ie) c.ie = { s0: c.start, tS: 0, tE: 0, tempo: 0, semis: 0, loop: null, ph0: null, bpm0: st.bpm, key0: st.key ? cloneP(st.key) : null };
+    return c.ie;
+  }
+  function instruClip() { var t = instruTrack(); return t ? firstClipOf(t) : null; }
+  function instruLoopBuf(orig, ie) {
+    var sr = orig.sampleRate, nc = orig.numberOfChannels, bar = 240 / ie.bpm0, lp = ie.loop;
+    var a = Math.round((ie.ph0 + (lp.bar - 1) * bar) * sr), n = Math.round(lp.n * bar * sr);
+    a = clamp(a, 0, Math.max(0, orig.length - 1));
+    n = Math.min(n, orig.length - a);
+    if (n < sr * 0.05) n = Math.max(1, Math.min(orig.length, Math.round(bar * sr)));
+    var out = getCtx().createBuffer(nc, n * lp.x, sr), c, k, i, g, xf = Math.min(Math.round(0.004 * sr), n >> 2);
+    for (c = 0; c < nc; c++) {
+      var src = orig.getChannelData(c), d = out.getChannelData(c);
+      for (k = 0; k < lp.x; k++) for (i = 0; i < n; i++) {
+        g = 1;
+        if (i < xf) g = i / xf;
+        if (i >= n - xf) g = Math.min(g, (n - i) / xf);
+        d[k * n + i] = src[a + i] * g;
+      }
+    }
+    return out;
+  }
+  // Recalcule le beat à partir de l'original (boucle, puis étirement / transposition en Worker)
+  function instruApply(label) {
+    var c = instruClip(); if (!c) return;
+    var ie = ieOf(c), tok = ++IE_TOK, orig = c.orig, nc = orig.numberOfChannels, sr = orig.sampleRate;
+    var t = 1 + ie.tempo / 100, f = Math.pow(2, ie.semis / 12);
+    function finish(buf) {
+      if (tok !== IE_TOK || !instruClip()) return;
+      c.buffer = buf;
+      ie.busy = false;
+      instruSetTrim(c, ie.tS, ie.tE);
+      st.bpm = Math.round(ie.bpm0 * t * 10) / 10;
+      if (ie.key0) st.key = { t: ((ie.key0.t + ie.semis) % 12 + 12) % 12, m: ie.key0.m };
+      setStatus(label + ' : ' + fr1(buf.duration, 1) + ' s, ' + fr1(st.bpm, 1) + ' BPM.');
+      edited(label);
+      renderInstru();
+    }
+    function stretchThen(base) {
+      if (Math.abs(ie.tempo) < 0.01 && ie.semis === 0) { finish(base); return; }
+      var ch = [], k;
+      for (k = 0; k < nc; k++) ch.push(base.getChannelData(k).slice());
+      ie.busy = true; renderInstru();
+      syncRun('stretch', 'stretch', { ch: ch, sr: sr, a: f / t, b: f }, ch.map(function (q) { return q.buffer; }), 'Calcul de l’instru…', function (r) {
+        if (tok !== IE_TOK) return;
+        var out = getCtx().createBuffer(r.ch.length, r.ch[0].length, sr), j;
+        for (j = 0; j < r.ch.length; j++) out.copyToChannel(r.ch[j], j);
+        finish(out);
+      });
+    }
+    if (!ie.loop) { stretchThen(orig); return; }
+    if (ie.ph0 == null) {
+      var m = orig.getChannelData(0).slice(0, Math.min(orig.length, Math.round(120 * sr)));
+      ie.busy = true; renderInstru();
+      syncRun('phase', 'instru', { ch: [m], sr: sr, bpm: ie.bpm0 }, [m.buffer], 'Recherche du premier temps…', function (r) {
+        if (tok !== IE_TOK) return;
+        ie.ph0 = r.ph;
+        stretchThen(instruLoopBuf(orig, ie));
+      });
+      return;
+    }
+    stretchThen(instruLoopBuf(orig, ie));
+  }
+  // Rognage non destructif : le contenu reste à sa place dans le morceau (les prises restent calées)
+  function instruSetTrim(c, tS, tE) {
+    var ie = ieOf(c), d = c.buffer.duration;
+    // Début ≤ Fin − 1 s : tS et tE (coupe depuis la fin) sont bornés pour garder au moins 1 s
+    ie.tS = clamp(tS, 0, Math.max(0, d - 1));
+    ie.tE = clamp(tE, 0, Math.max(0, d - ie.tS - 1));
+    c.offset = ie.tS;
+    c.start = ie.s0 + ie.tS;
+    c.duration = Math.max(0.05, d - ie.tS - ie.tE);
+    clampFades(c);
+  }
+  function instruReset() {
+    var c = instruClip(); if (!c || !c.orig) return;
+    var ie = ieOf(c);
+    c.buffer = c.orig;
+    ie.tS = 0; ie.tE = 0; ie.tempo = 0; ie.semis = 0; ie.loop = null;
+    st.bpm = ie.bpm0; if (ie.key0) st.key = cloneP(ie.key0);
+    instruSetTrim(c, 0, 0);
+    edited('Réinitialiser l’instru');
+    setStatus('Instru remise à l’original.');
+    renderInstru();
+  }
+  // Construction de la feuille « Modifier l’instru »
+  function buildShInstru(body) {
+    var U = st.ui.ins = {};
+    U.info = el('div', 'as-sync-src', '');
+    body.appendChild(U.info);
+    U.msg = el('div', 'as-sync-msg', '');
+    U.msg.setAttribute('role', 'status');
+    body.appendChild(U.msg);
+    function sec(title) { var s = el('div', 'as-sub', title); s.style.marginTop = '10px'; body.appendChild(s); return s; }
+    // Début et fin : poignées (secondes) + affichage mm:ss
+    sec('Début et fin (rognage)');
+    U.tS = vrow(body, 'Début', 0, 60, 0.05);
+    U.tE = vrow(body, 'Fin', 0, 60, 0.05);
+    // Fin = position de fin dans l'instru d'origine (affichée par défaut à sa durée)
+    U.tS.r.addEventListener('input', function () { U.tS.v.textContent = fmtDur(+U.tS.r.value); });
+    U.tE.r.addEventListener('input', function () { U.tE.v.textContent = fmtDur(+U.tE.r.value); });
+    U.tS.r.addEventListener('change', function () { var c = instruClip(); if (!c) return; var d = c.orig ? c.orig.duration : c.buffer.duration, e = d - ieOf(c).tE; instruSetTrim(c, Math.min(+U.tS.r.value, e - 1), ieOf(c).tE); edited('Rogner le début du beat'); renderInstru(); });
+    U.tE.r.addEventListener('change', function () { var c = instruClip(); if (!c) return; var d = c.orig ? c.orig.duration : c.buffer.duration, S = ieOf(c).tS; var end = Math.max(+U.tE.r.value, S + 1); instruSetTrim(c, S, d - end); edited('Rogner la fin du beat'); renderInstru(); });
+    // Boucle : section de N mesures répétée X fois (construit une nouvelle instru)
+    sec('Boucler une partie');
+    var lr = el('div', 'as-sync-row');
+    lr.appendChild(lbl('Mesure'));
+    U.loopBar = inp('number', 'as-num'); U.loopBar.min = 1; U.loopBar.max = 999; U.loopBar.step = 1;
+    U.loopBar.setAttribute('aria-label', 'Première mesure de la boucle');
+    U.loopBar.addEventListener('change', function () { IE_UI.loopBar = clamp(Math.round(+U.loopBar.value) || 1, 1, 999); });
+    lr.appendChild(U.loopBar);
+    lr.appendChild(lbl('Mesures'));
+    U.loopN = [1, 2, 4, 8].map(function (n) { return chip(String(n), n + ' mesure' + (n > 1 ? 's' : ''), false, 'as-sgrid', function () { IE_UI.loopN = n; renderInstru(); }); });
+    U.loopN.forEach(function (b) { lr.appendChild(b); });
+    lr.appendChild(lbl('Fois'));
+    U.loopX = [1, 2, 3, 4].map(function (n) { return chip(String(n), n + ' fois', false, 'as-sgrid', function () { IE_UI.loopX = n; renderInstru(); }); });
+    U.loopX.forEach(function (b) { lr.appendChild(b); });
+    body.appendChild(lr);
+    var lb = el('div', 'as-sync-row');
+    U.loopGo = ibtn(lb, 'loop', 'Construire la boucle', 'Répéter la section choisie (construit une nouvelle instru)', function () {
+      var c = instruClip(); if (!c) return;
+      var ie = ieOf(c);
+      ie.loop = { bar: IE_UI.loopBar, n: IE_UI.loopN, x: IE_UI.loopX };
+      ie.tS = 0; ie.tE = 0;
+      instruApply('Boucle de l’instru');
+    });
+    U.loopOff = ibtn(lb, 'back', 'Sans boucle', 'Revenir au morceau sans boucle', function () {
+      var c = instruClip(); if (!c) return;
+      ieOf(c).loop = null; instruApply('Boucle retirée');
+    });
+    body.appendChild(lb);
+    // Tempo et tonalité : étirement (hauteur conservée) et transposition (durée conservée)
+    sec('Tempo et tonalité');
+    U.tempo = vrow(body, 'Tempo', -20, 20, 1);
+    U.tempo.v.style.minWidth = '120px';
+    U.tempo.r.addEventListener('input', function () { U.tempo.v.textContent = tempoTxt(+U.tempo.r.value); });
+    U.tempo.r.addEventListener('change', function () { var c = instruClip(); if (!c) return; ieOf(c).tempo = +U.tempo.r.value; instruApply('Tempo de l’instru'); });
+    U.semis = vrow(body, 'Tonalité', -6, 6, 1);
+    U.semis.r.addEventListener('input', function () { U.semis.v.textContent = semiTxt(+U.semis.r.value); });
+    U.semis.r.addEventListener('change', function () { var c = instruClip(); if (!c) return; ieOf(c).semis = +U.semis.r.value; instruApply('Tonalité de l’instru'); });
+    U.warn = el('div', 'as-sync-info', 'Tempo et tonalité sont non destructifs (l’original est gardé). Les prises déjà enregistrées ne suivent pas le nouveau tempo : utilise « Recaler ». Au-delà de ±3 demi-tons, des artefacts sont possibles.');
+    body.appendChild(U.warn);
+    // Volume et fondus du beat
+    sec('Volume et fondus');
+    U.vol = vrow(body, 'Volume', 0, 100, 1);
+    U.vol.r.addEventListener('input', function () { var t = instruTrack(); if (!t) return; setPct(t, +U.vol.r.value); U.vol.v.textContent = pctOf(t) + ' %'; });
+    U.vol.r.addEventListener('change', function () { pushHistory('Volume du beat'); });
+    U.fi = vrow(body, 'Fondu entrée', 0, 6, 0.05);
+    U.fo = vrow(body, 'Fondu sortie', 0, 6, 0.05);
+    U.fi.r.addEventListener('input', function () { var c = instruClip(); if (!c) return; c.fadeIn = +U.fi.r.value; clampFades(c); U.fi.v.textContent = fr1(c.fadeIn, 2) + ' s'; });
+    U.fo.r.addEventListener('input', function () { var c = instruClip(); if (!c) return; c.fadeOut = +U.fo.r.value; clampFades(c); U.fo.v.textContent = fr1(c.fadeOut, 2) + ' s'; });
+    U.fi.r.addEventListener('change', function () { edited('Fondu d’entrée du beat'); });
+    U.fo.r.addEventListener('change', function () { edited('Fondu de sortie du beat'); });
+    // Pied
+    var foot = el('div', 'as-sync-foot');
+    U.reset = ibtn(foot, 'reset', 'Réinitialiser l’instru', 'Remettre l’instru telle qu’importée (rognage, boucle, tempo, tonalité)', instruReset);
+    U.replace = ibtn(foot, 'import', 'Remplacer le beat', 'Choisir un autre fichier pour le beat', function () { st.ui.bFileMode = 'change'; st.ui.bFile.click(); });
+    ibtn(foot, 'close', 'Fermer', 'Fermer la feuille', function () { closeOv(st.ui.shInstru); renderBooth(); });
+    body.appendChild(foot);
+  }
+  function tempoTxt(p) { var c = instruClip(), bpm = c && c.ie ? c.ie.bpm0 : st.bpm; return (p > 0 ? '+' : '') + p + ' % · ' + fr1(bpm * (1 + p / 100), 1) + ' BPM'; }
+  function semiTxt(k) { return (k > 0 ? '+' : '') + k + ' demi-ton' + (Math.abs(k) > 1 ? 's' : ''); }
+  function renderInstru() {
+    var u = st.ui, U = u.ins;
+    if (!U || u.shInstru.ov.hidden) return;
+    var c = instruClip();
+    if (!c) { U.info.textContent = 'Aucun beat dans ce son.'; return; }
+    var ie = ieOf(c), d = c.orig ? c.orig.duration : c.buffer.duration;
+    U.info.textContent = (c.name || 'Beat') + ' · ' + fmtDur(d) + ' · ' + fr1(st.bpm, 1) + ' BPM' + (st.key ? ' · ' + keyName(st.key) : '');
+    U.msg.textContent = ie.busy ? 'Calcul en cours…' : '';
+    // Plages : Début et Fin parcourent la durée d'origine ; Fin = d − tE
+    U.tS.r.min = 0; U.tS.r.max = Math.max(1, d); U.tE.r.min = 0; U.tE.r.max = Math.max(1, d);
+    var endPos = d - ie.tE;
+    if (document.activeElement !== U.tS.r) { U.tS.r.value = ie.tS; U.tS.v.textContent = fmtDur(ie.tS); }
+    if (document.activeElement !== U.tE.r) { U.tE.r.value = endPos; U.tE.v.textContent = fmtDur(endPos); }
+    if (document.activeElement !== U.loopBar) U.loopBar.value = IE_UI.loopBar;
+    U.loopN.forEach(function (b, i) { var on = [1, 2, 4, 8][i] === IE_UI.loopN; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
+    U.loopX.forEach(function (b, i) { var on = [1, 2, 3, 4][i] === IE_UI.loopX; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
+    if (document.activeElement !== U.tempo.r) { U.tempo.r.value = ie.tempo; U.tempo.v.textContent = tempoTxt(ie.tempo); }
+    if (document.activeElement !== U.semis.r) { U.semis.r.value = ie.semis; U.semis.v.textContent = semiTxt(ie.semis); }
+    var t = instruTrack();
+    if (t && document.activeElement !== U.vol.r) { U.vol.r.value = pctOf(t); U.vol.v.textContent = pctOf(t) + ' %'; }
+    U.fi.r.max = U.fo.r.max = Math.max(0.1, Math.min(6, c.buffer.duration / 2));
+    if (document.activeElement !== U.fi.r) { U.fi.r.value = c.fadeIn || 0; U.fi.v.textContent = fr1(c.fadeIn || 0, 2) + ' s'; }
+    if (document.activeElement !== U.fo.r) { U.fo.r.value = c.fadeOut || 0; U.fo.v.textContent = fr1(c.fadeOut || 0, 2) + ' s'; }
+    U.reset.disabled = ie.busy;
+    U.loopGo.disabled = ie.busy; U.loopOff.disabled = ie.busy || !ie.loop;
+  }
+
+  // ---------- Recalage v4 : portée, groove, latence seule, sensibilité, respirations, suivi de beat, corrections manuelles ----------
+  var SY_PRESET_KEYS = ['naturel', 'serre', 'laid', 'latence'];
+  var SY_PRESET = {
+    naturel: { lbl: 'Naturel', force: 50, span: 60, tol: 5, grid: '1/8', groove: 'droit', laid: 0, keepOff: false },
+    serre: { lbl: 'Serré', force: 90, span: 150, tol: 5, grid: '1/16', groove: 'droit', laid: 0, keepOff: false },
+    laid: { lbl: 'Laid-back', force: 70, span: 150, tol: 3, grid: '1/8', groove: 'laid', laid: 20, keepOff: false },
+    latence: { lbl: 'Juste la latence', force: 70, span: 150, tol: 15, grid: '1/8', groove: 'droit', laid: 0, keepOff: true }
+  };
+  var SY_GROOVE = [['droit', 'Droit'], ['laid', 'Laid-back'], ['avance', 'En avance']];
+  var SY_TRACK = [['auto', 'Auto'], ['on', 'Suivre le beat'], ['off', 'Grille fixe']];
+  // Réglages par défaut et normalisation (valeurs littérales : appelé pendant l'initialisation)
+  function syncPrefFrom(o) {
+    o = o || {};
+    var num = function (v, a, b, d) { v = +v; return isFinite(v) ? clamp(v, a, b) : d; };
+    return {
+      force: num(o.force, 0, 100, 70), swing: num(o.swing, 0, 60, 0), tol: num(o.tol, 0, 60, 15),
+      grid: ['1/4', '1/8', '1/16', '1/8T'].indexOf(o.grid) >= 0 ? o.grid : '1/8',
+      span: num(o.span, 20, 150, 150), laid: num(o.laid, 0, 40, 0),
+      groove: ['droit', 'laid', 'avance'].indexOf(o.groove) >= 0 ? o.groove : 'droit',
+      keepOff: !!o.keepOff, sens: num(o.sens, 0, 100, 50), breath: o.breath !== false,
+      track: ['auto', 'on', 'off'].indexOf(o.track) >= 0 ? o.track : 'auto'
+    };
+  }
+  function syncLoadPref() {
+    var p = st.syncPref || syncPrefFrom(null);
+    SY.force = p.force; SY.swing = p.swing; SY.tol = p.tol; SY.grid = p.grid; SY.span = p.span; SY.laid = p.laid;
+    SY.groove = p.groove; SY.keepOff = p.keepOff; SY.sens = p.sens; SY.breath = p.breath; SY.track = p.track;
+  }
+  function syncSavePref() {
+    st.syncPref = syncPrefFrom({ force: SY.force, swing: SY.swing, tol: SY.tol, grid: SY.grid, span: SY.span, laid: SY.laid,
+      groove: SY.groove, keepOff: SY.keepOff, sens: SY.sens, breath: SY.breath, track: SY.track });
+    markDirty();
+  }
+  // Applique un préréglage nommé (réglages du recalage, mémorisés par projet)
+  function syncPreset(k) {
+    var P = SY_PRESET[k];
+    if (!P) return;
+    SY.force = P.force; SY.span = P.span; SY.tol = P.tol; SY.grid = P.grid; SY.groove = P.groove; SY.laid = P.laid; SY.keepOff = P.keepOff;
+    SY.swing = 0;
+    SY.preset = k;
+    syncSavePref();
+    syncRequestRender();
+    renderSync();
+  }
+  // Attaques effectives : détectées, moins les supprimées, plus les ajoutées ; figées ; cibles manuelles
+  function syncEff() {
+    var v = SY.vox;
+    if (!v) return null;
+    var tolT = 0.015, i, k, list = [], t, n, att, wk, man;
+    function near(arr, x) { for (var q = 0; q < arr.length; q++) if (Math.abs(arr[q] - x) < tolT) return true; return false; }
+    for (i = 0; i < v.n; i++) {
+      t = v.att[i];
+      if (near(SY.delL, t)) continue;
+      list.push({ t: t, wk: SY.breath ? v.wk[i] : 1, fixed: near(SY.fixL, t), man: NaN });
+    }
+    SY.addL.forEach(function (ta) { list.push({ t: ta, wk: 1, fixed: false, man: NaN }); });
+    list.sort(function (a, b) { return a.t - b.t; });
+    SY.tgtL.forEach(function (g) { for (var q = 0; q < list.length; q++) if (Math.abs(list[q].t - g.t) < tolT) { list[q].man = g.v; break; } });
+    n = list.length; att = new Float64Array(n); wk = new Uint8Array(n); man = new Float64Array(n);
+    for (k = 0; k < n; k++) { att[k] = list[k].t; wk[k] = list[k].fixed ? 0 : list[k].wk; man[k] = list[k].man; }
+    return { att: att, wk: wk, man: man, n: n, items: list };
+  }
+  // Grille suivie : temps des subdivisions entre les temps détectés (take-relative), extrapolée aux bords
+  function syncGridFromBeats(B, div, sw) {
+    if (!B || B.length < 2) return null;
+    var Bx = [], k, j, a, b, seg, out = [], last;
+    Bx.push(B[0] - (B[1] - B[0]));
+    for (k = 0; k < B.length; k++) Bx.push(B[k]);
+    last = B.length - 1;
+    Bx.push(B[last] + (B[last] - B[last - 1]));
+    for (k = 0; k < Bx.length - 1; k++) {
+      a = Bx[k]; b = Bx[k + 1]; seg = (b - a) / div;
+      for (j = 0; j < div; j++) out.push(a + j * seg + ((sw > 0 && (j & 1)) ? sw * seg : 0));
+    }
+    out.push(Bx[Bx.length - 1]);
+    return Float64Array.from(out);
+  }
+  function syncGridG(g) {
+    if (!SY.trackOn || !SY.beatsRel) return null;
+    return syncGridFromBeats(SY.beatsRel, SY_GF[SY.grid], g.sw);
+  }
+  // Décision « Auto » : suivi seulement si les temps détectés s’écartent de plus de 10 ms d’une grille droite
+  function syncTrackDecide() {
+    var B = SY.beatsRel, n = B ? B.length : 0, i, sx = 0, sy = 0, sxx = 0, sxy = 0, a, b, mx = 0;
+    if (n < 6) { SY.trackOn = false; SY.trackMax = 0; return; }
+    for (i = 0; i < n; i++) { sx += i; sy += B[i]; sxx += i * i; sxy += i * B[i]; }
+    b = (n * sxy - sx * sy) / (n * sxx - sx * sx); a = (sy - b * sx) / n;
+    for (i = 0; i < n; i++) mx = Math.max(mx, Math.abs(B[i] - (a + b * i)));
+    SY.trackMax = mx;
+    SY.trackOn = SY.track === 'on' || (SY.track === 'auto' && mx > 0.010);
+  }
+  function syncBeatsRun() {
+    var ic = SY.ic;
+    if (!ic || SY.track === 'off') { SY.beatsRel = null; syncTrackDecide(); return; }
+    var b = ic.buffer, sr = b.sampleRate, s0 = Math.round(ic.offset * sr);
+    var n = Math.min(b.length - s0, Math.round(Math.min(ic.duration, 120) * sr));
+    var L = b.getChannelData(0).slice(s0, s0 + n);
+    syncRun('beats', 'beats', { ch: [L], sr: sr, bpm: SY.bpm, tight: 100 }, [L.buffer], 'Suivi du beat de l’instru…', function (bt) {
+      if (!SY.open) return;
+      var rel = new Float64Array(bt.length), k;
+      for (k = 0; k < bt.length; k++) rel[k] = ic.start + bt[k] - SY.src.start;
+      SY.beatsRel = rel;
+      syncTrackDecide();
+      syncRequestRender();
+    });
+  }
+  function syncAnalyzeVoice() {
+    var m = { ch: SY.ch.map(function (c) { return new Float32Array(c); }), sr: SY.sr, sens: SY.sens };
+    var tr = m.ch.map(function (c) { return c.buffer; });
+    syncRun('voice', 'voice', m, tr, 'Analyse des attaques de la voix…', function (r) {
+      if (!SY.open) return;
+      SY.vox = { att: r.att, wk: r.wk, n: r.n };
+      SY.haveVox = true;
+      syncRequestRender();
+    });
+  }
+  // Tempo (full = recherche 70-180 BPM) ou phase seule au tempo courant ; puis suivi des temps
+  function syncAnalyzeInstru(full) {
+    var ic = SY.ic;
+    if (!ic) { SY.t0 = 0; SY.haveGrid = true; SY.beatsRel = null; syncTrackDecide(); syncRequestRender(); renderSync(); return; }
+    var b = ic.buffer, sr = b.sampleRate, s0 = Math.round(ic.offset * sr);
+    var n = Math.min(b.length - s0, Math.round(Math.min(ic.duration, 120) * sr));
+    var L = b.getChannelData(0).slice(s0, s0 + n);
+    var m = { ch: [L], sr: sr, bpm: full ? 0 : SY.bpm };
+    syncRun('instru', 'instru', m, [L.buffer], full ? 'Détection du tempo de l’instru…' : 'Recherche du premier temps…', function (r) {
+      if (!SY.open) return;
+      if (full) SY.bpm = Math.round(r.bpm * 10) / 10;
+      SY.ph = r.ph;
+      SY.t0 = ic.start + r.ph;
+      SY.conf = r.conf;
+      SY.haveGrid = true;
+      syncBeatsRun();
+      syncRequestRender();
+    });
+  }
+  // Temps des points de grille (en secondes de la prise), suivis ou uniformes, pour l'affichage
+  function gridTimes(dur) {
+    var g = syncGrid(), out = [], k0, k, base, t, G = SY.trackOn && SY.beatsRel ? syncGridG(g) : null, i;
+    if (G) { for (i = 0; i < G.length; i++) if (G[i] >= 0 && G[i] <= dur) out.push(G[i]); return out; }
+    k0 = Math.floor(-g.ph / g.s) - 1;
+    for (k = k0; ; k++) {
+      base = g.ph + k * g.s;
+      if (base > dur) break;
+      t = base + ((g.sw > 0 && (k & 1)) ? g.sw * g.s : 0);
+      if (t >= 0 && t <= dur) out.push(t);
+    }
+    return out;
+  }
+  function syncRenderNow() {
+    SY.rt = null;
+    if (!SY.open || !SY.haveVox || !SY.haveGrid || !SY.vox) return;
+    var g = syncGrid(), e = syncEff(), G = syncGridG(g);
+    if (!e) return;
+    var lay = SY.groove === 'laid' ? SY.laid / 1000 : (SY.groove === 'avance' ? -SY.laid / 1000 : 0);
+    // copies transférables : e.att / e.wk / e.man restent utilisés par l'interface
+    var m = { ch: SY.ch.map(function (c) { return new Float32Array(c); }), sr: SY.sr, att: e.att.slice(), wk: e.wk.slice(), s: g.s, ph: g.ph, sw: g.sw,
+      force: SY.force, tol: SY.tol, span: SY.span, laid: lay * 1000, keepOff: SY.keepOff, man: e.man.slice(), G: G ? G.slice() : null, sd: 60 / SY.bpm,
+      Gb: (SY.trackOn && SY.beatsRel) ? SY.beatsRel.slice() : null };
+    var tr = m.ch.map(function (c) { return c.buffer; }).concat([m.att.buffer, m.wk.buffer, m.man.buffer]);
+    if (G) tr.push(G.buffer);
+    if (m.Gb) tr.push(m.Gb.buffer);
+    SY.eff = e;
+    syncRun('render', 'render', m, tr, 'Calcul du recalage…', function (r) {
+      if (!SY.open) return;
+      var ctx = getCtx(), L = r.ch[0].length, buf = ctx.createBuffer(2, L, SY.sr);
+      buf.copyToChannel(r.ch[0], 0); buf.copyToChannel(r.ch[1] || r.ch[0], 1);
+      SY.out = { buf: buf, info: r };
+      SY.pk.A = null;
+      if (SY.hook) { var hk = SY.hook; SY.hook = null; hk(); }
+    });
+  }
+  function openSync(src, quiet) {
+    if (st.recording || st.recPending) { setStatus('Termine l’enregistrement avant de recaler.', true); return; }
+    if (!src || !src.buffer) { setStatus('Sélectionne une prise ou un clip à recaler.', true); return; }
+    stopSync();
+    var b = src.buffer, sr = b.sampleRate, s0 = Math.max(0, Math.round(src.offset * sr));
+    var n = Math.min(b.length - s0, Math.round(src.duration * sr));
+    if (n < sr * 0.5) { setStatus('Prise trop courte pour être recalée.', true); return; }
+    SY.src = src; SY.sr = sr; SY.dur = n / sr; SY.out = null; SY.vox = null; SY.ab = 'after';
+    SY.ch = [];
+    for (var c = 0; c < Math.min(2, b.numberOfChannels); c++) SY.ch.push(b.getChannelData(c).slice(s0, s0 + n));
+    if (SY.ch.length === 1) SY.ch.push(SY.ch[0].slice());
+    SY.pk = {};
+    syncLoadPref();
+    SY.fixL = []; SY.addL = []; SY.delL = []; SY.tgtL = []; SY.eff = null; SY.beatsRel = null; SY.trackOn = false; SY.preset = null;
+    var tr = instruTrack();
+    SY.ic = tr ? firstClipOf(tr) : null;
+    SY.bpm = st.bpm;
+    SY.haveVox = false; SY.haveGrid = !SY.ic; SY.t0 = 0; SY.ph = 0;
+    SY.open = true;
+    if (SY.ui && !quiet) SY.ui.ov.hidden = false;
+    syncAnalyzeVoice();
+    syncAnalyzeInstru(false);
+    renderSync();
+  }
   function syncDraw() {
     var U = SY.ui;
     if (!U || !SY.open) return;
@@ -13399,8 +14198,19 @@ select.ie-in{width:auto}
       g.fillStyle = 'rgba(34,211,238,0.75)';
       drawPeaks(g, syncPeaks(SY.out.buf.getChannelData(0), W, 'A'), 134, 34, W);
     }
+    var E = SY.eff;
+    if (E) {
+      // Repères du haut : attaque mobile (violet), figée (gris), cible manuelle (cercle)
+      for (i = 0; i < E.n; i++) {
+        x = Math.round(X(E.att[i])) + 0.5;
+        var fixed = SY.fixL.some(function (q) { return Math.abs(q - E.att[i]) < 0.015; });
+        g.fillStyle = fixed ? 'rgba(180,180,190,0.9)' : '#a855f7';
+        g.fillRect(x - 3, 0, 6, 12);
+        if (isFinite(E.man[i])) { g.strokeStyle = '#fbbf24'; g.lineWidth = 1.5; g.beginPath(); g.arc(X(E.man[i]), 8, 4, 0, 2 * Math.PI); g.stroke(); }
+      }
+    }
     if (SY.vox) {
-      var att = SY.vox.att;
+      var att = E ? E.att : SY.vox.att;
       g.strokeStyle = '#a855f7'; g.lineWidth = 2; g.beginPath();
       for (i = 0; i < att.length; i++) { x = Math.round(X(att[i])) + 0.5; g.moveTo(x, 0); g.lineTo(x, 12); }
       g.stroke();
@@ -13422,6 +14232,61 @@ select.ie-in{width:auto}
       if (pos >= 0 && pos <= dur) { g.strokeStyle = '#ffffff'; g.lineWidth = 1.5; g.beginPath(); x = X(pos); g.moveTo(x, 0); g.lineTo(x, H); g.stroke(); }
     }
   }
+  // Pointeur sur la forme d'onde : toucher = figer / libérer une attaque ; glisser le repère du haut = cible ;
+  // double toucher = ajouter (sur un vide) ou retirer (sur une attaque)
+  function syncCvDown(e) {
+    if (!SY.eff) return;
+    var U = SY.ui, r = U.cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    var t = clamp(x / r.width * SY.dur, 0, SY.dur), k = -1, best = 14 * SY.dur / r.width, i;
+    if (!SY.eff) return;
+    for (i = 0; i < SY.eff.n; i++) { var d = Math.abs(SY.eff.att[i] - t); if (d < best) { best = d; k = i; } }
+    SY.cvD = { x: x, t: t, k: k, top: y < 40, moved: false, at: Date.now(), tgt: null };
+    U.cv.setPointerCapture && U.cv.setPointerCapture(e.pointerId);
+  }
+  function syncCvMove(e) {
+    var D = SY.cvD;
+    if (!D || !D.top || D.k < 0) return;
+    var r = SY.ui.cv.getBoundingClientRect(), t = clamp((e.clientX - r.left) / r.width * SY.dur, 0, SY.dur);
+    if (Math.abs(e.clientX - r.left - D.x) < 4 && !D.moved) return;
+    D.moved = true;
+    var at = SY.eff.att[D.k];
+    SY.tgtL = SY.tgtL.filter(function (q) { return Math.abs(q.t - at) > 0.015; });
+    SY.tgtL.push({ t: at, v: t });
+    syncRequestRender();
+    renderSync();
+  }
+  function syncCvUp() {
+    var D = SY.cvD;
+    SY.cvD = null;
+    if (!D || !SY.eff) return;
+    var now = Date.now();
+    if (D.moved) return;
+    var dbl = SY.lastTap && now - SY.lastTap.at < 380 && Math.abs(SY.lastTap.t - D.t) < 0.1;
+    SY.lastTap = { at: now, t: D.t };
+    if (D.k >= 0) {
+      var at = SY.eff.att[D.k];
+      if (dbl) {
+        // retirer l'attaque
+        SY.delL.push(at); SY.addL = SY.addL.filter(function (q) { return Math.abs(q - at) > 0.015; });
+        SY.fixL = SY.fixL.filter(function (q) { return Math.abs(q - at) > 0.015; });
+        SY.lastTap = null;
+      } else {
+        var isF = SY.fixL.some(function (q) { return Math.abs(q - at) < 0.015; });
+        if (isF) SY.fixL = SY.fixL.filter(function (q) { return Math.abs(q - at) > 0.015; });
+        else SY.fixL.push(at);
+      }
+    } else if (dbl) {
+      SY.addL.push(D.t);
+      SY.lastTap = null;
+    }
+    syncRequestRender();
+    renderSync();
+  }
+  function syncResetManual() {
+    SY.fixL = []; SY.addL = []; SY.delL = []; SY.tgtL = []; SY.lastTap = null;
+    syncRequestRender();
+    renderSync();
+  }
   function renderSyncProg() {
     var U = SY.ui;
     if (!U || !SY.open) return;
@@ -13435,11 +14300,18 @@ select.ie-in{width:auto}
     var S = SY.src;
     U.src.textContent = S.name + ' · ' + fmtDur(SY.dur) + ' · ' + (SY.ic ? 'instru : ' + SY.ic.name : 'pas d’instru : grille du projet');
     if (document.activeElement !== U.bpm) U.bpm.value = (Math.round(SY.bpm * 10) / 10).toFixed(1);
-    U.info.textContent = SY.ic ? ('Premier temps à ' + fr1(SY.ph, 3) + ' s de l’instru') : 'Pas d’instru : la grille part de 0 s du projet';
+    U.info.textContent = (SY.ic ? 'Premier temps à ' + fr1(SY.ph, 3) + ' s de l’instru' : 'Pas d’instru : la grille part de 0 s du projet')
+      + (SY.ic ? ' · ' + (SY.trackOn ? 'suivi du beat (écart à une grille droite : ' + Math.round((SY.trackMax || 0) * 1000) + ' ms)' : 'grille fixe') : '');
     U.gridChips.forEach(function (o) { var on = o.key === SY.grid; o.b.classList.toggle('on', on); o.b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
-    if (document.activeElement !== U.force.r) { U.force.r.value = SY.force; U.force.v.textContent = SY.force + ' %'; }
-    if (document.activeElement !== U.swing.r) { U.swing.r.value = SY.swing; U.swing.v.textContent = SY.swing + ' %'; }
-    if (document.activeElement !== U.tol.r) { U.tol.r.value = SY.tol; U.tol.v.textContent = SY.tol + ' ms'; }
+    U.presetChips.forEach(function (o) { var on = o.key === SY.preset; o.b.classList.toggle('on', on); o.b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
+    U.grooveChips.forEach(function (o) { var on = o.key === SY.groove; o.b.classList.toggle('on', on); o.b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
+    U.trackChips.forEach(function (o) { var on = o.key === SY.track; o.b.classList.toggle('on', on); o.b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
+    var sl = [[U.force, SY.force, SY.force + ' %'], [U.swing, SY.swing, SY.swing + ' %'], [U.tol, SY.tol, SY.tol + ' ms'],
+      [U.span, SY.span, SY.span + ' ms'], [U.laid, SY.laid, '+' + SY.laid + ' ms'], [U.sens, SY.sens, SY.sens + ' %']];
+    sl.forEach(function (q) { if (document.activeElement !== q[0].r) { q[0].r.value = q[1]; q[0].v.textContent = q[2]; } });
+    U.laid.wrap.hidden = SY.groove === 'droit';
+    setSw(U.breath, SY.breath);
+    setSw(U.keepOff, SY.keepOff);
     var txt = '';
     if (SY.out) {
       var I = SY.out.info, ret = -I.d * 1000;
@@ -13448,6 +14320,7 @@ select.ie-in{width:auto}
     } else if (SY.vox) {
       txt = SY.vox.n + ' attaque(s) détectée(s).';
     }
+    if (SY.fixL.length || SY.addL.length || SY.delL.length || SY.tgtL.length) txt += ' · corrections à la main : ' + (SY.fixL.length + SY.addL.length + SY.delL.length + SY.tgtL.length);
     U.stats.textContent = txt;
     renderSyncProg();
     var busy = !!SY.busy;
@@ -13461,17 +14334,6 @@ select.ie-in{width:auto}
     syncDraw();
   }
   // Feuille « Recaler sur le temps » (créée une fois, masquée)
-  function syncSlider(parent, label, min, max, step, onInput, fmt) {
-    var wrap = el('span', 'as-sync-sl');
-    wrap.appendChild(lbl(label));
-    var r = inp('range', 'as-srange');
-    r.min = min; r.max = max; r.step = step;
-    var v = el('span', 'as-sval', '');
-    r.addEventListener('input', function () { v.textContent = fmt(+r.value); onInput(+r.value); });
-    wrap.appendChild(r); wrap.appendChild(v);
-    parent.appendChild(wrap);
-    return { r: r, v: v };
-  }
   function buildSync(p) {
     var ov = el('div', 'as-syncov');
     ov.hidden = true;
@@ -13485,6 +14347,15 @@ select.ie-in{width:auto}
     var U = { ov: ov };
     U.src = el('div', 'as-sync-src', '');
     box.appendChild(U.src);
+    // Préréglages
+    var rp = el('div', 'as-sync-row');
+    rp.appendChild(lbl('Réglage'));
+    U.presetChips = SY_PRESET_KEYS.map(function (k) {
+      var b = chip(SY_PRESET[k].lbl, 'Préréglage ' + SY_PRESET[k].lbl, false, 'as-sgrid', function () { syncPreset(k); });
+      rp.appendChild(b);
+      return { key: k, b: b };
+    });
+    box.appendChild(rp);
     // Tempo
     var r1 = el('div', 'as-sync-row');
     r1.appendChild(lbl('Tempo'));
@@ -13502,25 +14373,59 @@ select.ie-in{width:auto}
     box.appendChild(r1);
     U.info = el('div', 'as-sync-info', '');
     box.appendChild(U.info);
-    // Grille
+    // Grille et suivi du beat
     var r2 = el('div', 'as-sync-row');
     r2.appendChild(lbl('Grille'));
     U.gridChips = SY_GL.map(function (o) {
-      var b = chip(o[1], 'Grille ' + o[1], false, 'as-sgrid', function () { SY.grid = o[0]; renderSync(); syncRequestRender(); });
+      var b = chip(o[1], 'Grille ' + o[1], false, 'as-sgrid', function () { SY.grid = o[0]; SY.preset = null; syncSavePref(); renderSync(); syncRequestRender(); });
       r2.appendChild(b);
       return { key: o[0], b: b };
     });
     box.appendChild(r2);
-    // Réglages
+    var r2b = el('div', 'as-sync-row');
+    r2b.appendChild(lbl('Beat'));
+    U.trackChips = SY_TRACK.map(function (o) {
+      var b = chip(o[1], 'Suivi du beat : ' + o[1], false, 'as-sgrid', function () { SY.track = o[0]; SY.preset = null; syncSavePref(); syncBeatsRun(); renderSync(); });
+      r2b.appendChild(b);
+      return { key: o[0], b: b };
+    });
+    box.appendChild(r2b);
+    // Groove
+    var r2c = el('div', 'as-sync-row');
+    r2c.appendChild(lbl('Groove'));
+    U.grooveChips = SY_GROOVE.map(function (o) {
+      var b = chip(o[1], 'Groove : ' + o[1], false, 'as-sgrid', function () { SY.groove = o[0]; SY.preset = null; syncSavePref(); renderSync(); syncRequestRender(); });
+      r2c.appendChild(b);
+      return { key: o[0], b: b };
+    });
+    U.laid = syncSlider(r2c, 'Décalage', 0, 40, 1, function (v) { SY.laid = v; SY.preset = null; syncSavePref(); syncRequestRender(); }, function (v) { return '+' + v + ' ms'; });
+    box.appendChild(r2c);
+    // Réglages numériques
     var r3 = el('div', 'as-sync-row');
-    U.force = syncSlider(r3, 'Force', 0, 100, 1, function (v) { SY.force = v; syncRequestRender(); }, function (v) { return v + ' %'; });
-    U.swing = syncSlider(r3, 'Swing', 0, 60, 1, function (v) { SY.swing = v; syncRequestRender(); }, function (v) { return v + ' %'; });
-    U.tol = syncSlider(r3, 'Tolérance', 0, 60, 1, function (v) { SY.tol = v; syncRequestRender(); }, function (v) { return v + ' ms'; });
+    U.force = syncSlider(r3, 'Force', 0, 100, 1, function (v) { SY.force = v; SY.preset = null; syncSavePref(); syncRequestRender(); }, function (v) { return v + ' %'; });
+    U.swing = syncSlider(r3, 'Swing', 0, 60, 1, function (v) { SY.swing = v; SY.preset = null; syncSavePref(); syncRequestRender(); }, function (v) { return v + ' %'; });
+    U.tol = syncSlider(r3, 'Tolérance', 0, 60, 1, function (v) { SY.tol = v; SY.preset = null; syncSavePref(); syncRequestRender(); }, function (v) { return v + ' ms'; });
+    U.span = syncSlider(r3, 'Portée max', 20, 150, 1, function (v) { SY.span = v; SY.preset = null; syncSavePref(); syncRequestRender(); }, function (v) { return v + ' ms'; });
+    U.sens = syncSlider(r3, 'Sensibilité', 0, 100, 1, function (v) { SY.sens = v; SY.preset = null; syncSavePref(); clearTimeout(SY.sensT); SY.sensT = setTimeout(syncAnalyzeVoice, 220); }, function (v) { return v + ' %'; });
     box.appendChild(r3);
-    // Visualisation
+    // Interrupteurs
+    var r4 = el('div', 'as-sync-row');
+    U.breath = swRow(r4, 'Préserver les respirations', 'Les attaques faibles (souffle) ne sont pas déplacées', function () { SY.breath = !SY.breath; SY.preset = null; syncSavePref(); syncRequestRender(); renderSync(); });
+    U.keepOff = swRow(r4, 'Latence seule', 'Corrige seulement le décalage global, sans toucher syllabe par syllabe', function () { SY.keepOff = !SY.keepOff; SY.preset = null; syncSavePref(); syncRequestRender(); renderSync(); });
+    box.appendChild(r4);
+    // Visualisation : toucher = figer une attaque, glisser le repère du haut = cible, double toucher = ajouter / retirer
     U.cv = el('canvas', 'as-syncwave');
     U.cv.setAttribute('aria-label', 'Forme d’onde avec attaques et grille');
+    U.cv.addEventListener('pointerdown', syncCvDown);
+    U.cv.addEventListener('pointermove', syncCvMove);
+    U.cv.addEventListener('pointerup', syncCvUp);
+    U.cv.addEventListener('pointercancel', function () { SY.cvD = null; });
     box.appendChild(U.cv);
+    var hint = el('div', 'as-sync-info', 'Sur la forme d’onde : toucher une attaque (violet) la fige (gris). Glisser le repère du haut la déplace. Double toucher : ajouter ou retirer une attaque.');
+    box.appendChild(hint);
+    var rm = el('div', 'as-sync-row');
+    ibtn(rm, 'reset', 'Effacer les corrections à la main', 'Revenir aux attaques détectées sans corrections manuelles', syncResetManual);
+    box.appendChild(rm);
     U.stats = el('div', 'as-sync-stats', '');
     box.appendChild(U.stats);
     var pg = el('div', 'as-sync-prog');
@@ -13529,13 +14434,13 @@ select.ie-in{width:auto}
     box.appendChild(pg);
     U.msg = el('div', 'as-sync-msg', '');
     box.appendChild(U.msg);
-    // Écoute
-    var r4 = el('div', 'as-sync-row');
-    U.play = cbtn(r4, 'play', 'Écouter', '', function () { syncPlay(); });
+    // Écoute : Avant / Après (la prise recalée est comparée à l'originale, l'instru joue par-dessus)
+    var r5 = el('div', 'as-sync-row');
+    U.play = cbtn(r5, 'play', 'Écouter', '', function () { syncPlay(); });
     U.abB = chip('Avant', 'Écouter la prise d’origine', false, 'as-sab', function () { syncSetAB('before'); });
     U.abA = chip('Après', 'Écouter la prise recalée', false, 'as-sab', function () { syncSetAB('after'); });
-    r4.appendChild(U.abB); r4.appendChild(U.abA);
-    box.appendChild(r4);
+    r5.appendChild(U.abB); r5.appendChild(U.abA);
+    box.appendChild(r5);
     // Pied
     var foot = el('div', 'as-sync-foot');
     ibtn(foot, 'close', 'Annuler', 'Fermer sans modifier la prise', function () { closeSync(); });
@@ -13546,6 +14451,289 @@ select.ie-in{width:auto}
     ov.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeSync(); });
     window.addEventListener('resize', function () { if (SY.open) syncDraw(); });
     SY.ui = U;
+  }
+
+  // ---------- Mixage auto v4 : réglages (voix, niveau final, écarts, ducking, creusement), Avant / Après ----------
+  // Valeurs par défaut en littéraux : appelé pendant l'initialisation
+  function amixFrom(o) {
+    o = o || {};
+    var num = function (v, a, b, d) { v = +v; return isFinite(v) ? clamp(v, a, b) : d; };
+    var L = o.layer || {};
+    return {
+      voice: num(o.voice, -3, 8, 2),
+      target: o.target === null ? null : num(o.target, -24, -6, -14),
+      layer: { dbl: num(L.dbl, -12, 0, -6), adlib: num(L.adlib, -12, 0, -4), harm: num(L.harm, -16, 0, -8) },
+      duck: num(o.duck, 0, 6, 0), duckA: num(o.duckA, 10, 200, 50), duckR: num(o.duckR, 50, 1000, 300),
+      dyn: num(o.dyn, 0, 4, 0), section: o.section !== false, keep: !!o.keep
+    };
+  }
+  // Pistes de voix (même liste que l'Auto Mix)
+  function voiceTracksNow() {
+    return st.tracks.filter(function (t) {
+      return t.type !== 'aux' && (t.name === 'Voix' || t.name === 'Double' || t.name === 'Ad-libs' || t.name.indexOf('Harmonie') === 0);
+    });
+  }
+  // Enveloppe de présence de la voix (pas de 20 ms) : ducking (dB sur le beat) et creusement (dB à 3 kHz)
+  var DK_CACHE = null;
+  function duckEnv(end) {
+    var A = st.amix, dt = 0.02, N = Math.max(1, Math.ceil(end / dt) + 1), vt = voiceTracksNow(), vid = {}, ms = new Float64Array(N), i, cur = 0, a, r, maxE = 0, thr, p, e;
+    vt.forEach(function (t) { vid[t.id] = t; });
+    var key = [end.toFixed(2), A.duck, A.dyn, A.duckA, A.duckR, 'hold150', vt.map(function (t) { return t.id + ':' + t.db; }).join(','),
+      st.clips.filter(function (c) { return vid[c.trackId]; }).map(function (c) { return [c.id, c.start, c.duration, c.offset, c.gainDb, bufId(c.buffer)].join('~'); }).join('|')].join('#');
+    if (DK_CACHE && DK_CACHE.key === key) return DK_CACHE;
+    st.clips.forEach(function (c) {
+      var t = vid[c.trackId];
+      if (!t) return;
+      var g = dbToGain(t.db + (c.gainDb || 0)), g2 = g * g, ch = c.buffer.getChannelData(0), sr = c.buffer.sampleRate;
+      var i0 = Math.max(0, Math.round(c.offset * sr)), i1 = Math.min(ch.length, Math.round((c.offset + c.duration) * sr)), j, bin;
+      for (j = i0; j < i1; j++) {
+        bin = Math.floor((c.start + (j - i0) / sr) / dt);
+        if (bin >= 0 && bin < N) ms[bin] += ch[j] * ch[j] * g2;
+      }
+    });
+    var ev = new Float64Array(N);
+    for (i = 0; i < N; i++) { e = ms[i] / (dt * 44100); ev[i] = e; if (e > maxE) maxE = e; }
+    thr = maxE * Math.pow(10, -3.5); // présence : à moins de 35 dB du niveau de crête
+    a = Math.exp(-dt / (A.duckA / 1000)); r = Math.exp(-dt / (A.duckR / 1000));
+    var duck = new Float32Array(N), dyn = new Float32Array(N), hold = 0, holdN = Math.round(0.15 / dt);
+    for (i = 0; i < N; i++) {
+      p = ev[i] > thr && maxE > 0 ? 1 : 0;
+      // Maintien de 150 ms : la présence reste active entre les syllabes courtes (rap haché)
+      if (p) hold = holdN; else if (hold > 0) { hold--; p = 1; }
+      cur = p > cur ? cur + (p - cur) * (1 - a) : cur + (p - cur) * (1 - r);
+      duck[i] = -A.duck * cur;
+      dyn[i] = -A.dyn * cur;
+    }
+    DK_CACHE = { key: key, dt: dt, n: N, duck: duck, dyn: dyn };
+    return DK_CACHE;
+  }
+  // Automation du ducking et du creusement : une valeur par pas de 20 ms, à partir de la position P0 (temps ctx C0)
+  function scheduleDuck(gG, gE, env, P0, C0) {
+    var i0 = clamp(Math.floor(P0 / env.dt), 0, env.n - 1), i, when;
+    gG.setValueAtTime(dbToGain(env.duck[i0]), C0);
+    gE.setValueAtTime(env.dyn[i0], C0);
+    for (i = i0 + 1; i < env.n; i++) {
+      when = C0 + (i * env.dt - P0);
+      gG.linearRampToValueAtTime(dbToGain(env.duck[i]), when);
+      gE.linearRampToValueAtTime(env.dyn[i], when);
+    }
+  }
+  // Rendu hors ligne du mixage complet (sans mastering) : sonie intégrée (LUFS) pour le niveau final visé
+  function renderLufs(sr) {
+    var end = projectEnd();
+    var c = new OfflineAudioContext(2, Math.ceil((end + exportTail()) * sr), sr);
+    var g = buildGraph(c, c.destination, false, {});
+    startSources(g, 0, 0, null);
+    return c.startRendering().then(function (buf) { return lufsOf(chansOf(buf), sr); });
+  }
+  function amixSnap() { return { master: st.masterDb, db: st.tracks.map(function (t) { return [t.id, t.db]; }) }; }
+  function amixApply(s) {
+    s.db.forEach(function (q) { var t = trackById(q[0]); if (t) t.db = q[1]; });
+    st.masterDb = s.master;
+    applyMixLive();
+    renderAll();
+  }
+  // Auto Mix : voix − beat (réglable), écarts des couches, niveau final ; Avant / Après conservés
+  // Écart voix − beat mesuré sur le rendu (K-pondéré) : voix et beat rendus seuls à leur gain actuel
+  function balanceMeasure(R, end, sr) {
+    var out = {};
+    return measureFull(R.voice, end, sr, true).then(function (zv) {
+      out.vz = zv; return measureFull(R.beat, end, sr, true);
+    }).then(function (zb) {
+      var vs = gateStats(out.vz), mask = st.amix.section ? vs.mask : new Uint8Array(out.vz.length).fill(1);
+      return 10 * Math.log10(meanOn(out.vz, mask)) - 10 * Math.log10(meanOn(zb, mask));
+    });
+  }
+  // Passe 1 déjà appliquée ; mesure, puis passe 2 si l'écart dépasse 0,5 dB. Renvoie une note pour le statut.
+  function balanceCheck(R, end, sr, A) {
+    if (!R.beat || !clipsOf(R.beat.id).length) return Promise.resolve('');
+    var target = A.voice;
+    return balanceMeasure(R, end, sr).then(function (d1) {
+      var e1 = target - d1;
+      // Pistes silencieuses (log de zéro) : pas de mesure, pas de correction
+      if (!isFinite(d1)) return { d1: d1, d2: d1, note: 'mesure impossible (piste silencieuse)' };
+      if (Math.abs(e1) <= 0.5) return { d1: d1, d2: d1, note: '' };
+      R.voice.db = clamp(R.voice.db + e1, -60, 6);
+      applyMixLive();
+      return balanceMeasure(R, end, sr).then(function (d2) { return { d1: d1, d2: d2, note: 'passe 2 : ' + fr1(e1, 2) + ' dB' }; });
+    }).then(function (r) {
+      balCheck = r; return '';
+    });
+  }
+  var balCheck = null;
+  function autoMix(opts) {
+    opts = opts || {};
+    balCheck = null;
+    if (st.exporting || st.playing || st.recording || st.recPending) { setStatus('Arrête la lecture ou l’enregistrement avant d’équilibrer.', true); return; }
+    var R = balRoles(), end = projectEnd(), sr = 44100, list = [], skipped = [], A = st.amix;
+    if (!R.voice || !clipsOf(R.voice.id).length) { setStatus('Équilibrage : enregistre d’abord une voix.', true); return; }
+    [R.voice, R.beat, R.dbl, R.adlib].concat(R.harm).forEach(function (t) {
+      if (!t || list.indexOf(t) >= 0 || !clipsOf(t.id).length) return;
+      if (t.muted) { skipped.push(t.name + ' (coupée)'); return; }
+      if (t.auto && t.auto.vol && t.auto.vol.length) { skipped.push(t.name + ' (automation de volume)'); return; }
+      list.push(t);
+    });
+    if (list.indexOf(R.voice) < 0) { setStatus('Équilibrage : la voix est coupée ou automatisée.', true); return; }
+    st.exporting = true;
+    setStatus('Équilibrage : mesure des pistes…');
+    var res = {}, chain = Promise.resolve(), before = amixSnap();
+    list.forEach(function (t) {
+      chain = chain.then(function () { return measureFull(t, end, sr, false).then(function (z) { res[t.id] = z; }); });
+    });
+    chain.then(function () {
+      var V = R.voice, vz = res[V.id], vs = gateStats(vz), LvInt = vs.lufs;
+      var mask = A.section ? vs.mask : new Uint8Array(vz.length).fill(1);
+      var changes = [], beatTxt = '', mV = meanOn(vz, mask), vBase = V.db;
+      // Beat : voix − beat = réglage (dB) sur les passages chantés. Si la voix dépasse +4 dB au-dessus de ce réglage, le beat baisse.
+      if (R.beat && res[R.beat.id]) {
+        var mB = meanOn(res[R.beat.id], mask);
+        if (mV > 0 && mB > 0) {
+          var d = 10 * Math.log10(mV) - 10 * Math.log10(mB), vNew = R.beat.db + A.voice - d, cap = 6;
+          if (vNew > cap) { vNew = cap; changes.push([R.beat, clamp(cap - A.voice + d, -60, 6)]); }
+          vBase = clamp(vNew, -60, 6);
+          changes.push([V, vBase]);
+          beatTxt = 'voix − beat ' + (A.voice > 0 ? '+' : '') + fr1(A.voice, 1) + ' dB ' + (A.section ? 'sur les passages chantés' : 'sur tout le morceau');
+        }
+      }
+      // Doubles, ad-libs, harmonies : écart visé sous la voix (intégré sur leurs propres passages)
+      function rel(t, off) {
+        var li = gateStats(res[t.id]).lufs;
+        if (!isFinite(li) || !isFinite(LvInt)) return;
+        changes.push([t, clamp(vBase + LvInt - off - li, -60, 6)]);
+      }
+      if (R.dbl && res[R.dbl.id]) rel(R.dbl, -A.layer.dbl);
+      if (R.adlib && res[R.adlib.id]) rel(R.adlib, -A.layer.adlib);
+      R.harm.forEach(function (h) { if (res[h.id]) rel(h, -A.layer.harm); });
+      if (!changes.length) { st.exporting = false; setStatus('Équilibrage : rien à régler (pistes silencieuses).', true); return; }
+      changes.forEach(function (ch) { ch[0].db = ch[1]; });
+      applyMixLive();
+      renderAll();
+      // Passe de contrôle : voix et beat rendus seuls à leur gain actuel ; correction si l'écart dépasse 0,5 dB
+      balanceCheck(R, end, sr, A).then(function () {
+        // Niveau final visé : le mixage (sans mastering) est recalé sur la sonie cible
+        var levelDone = function (note) {
+          st.exporting = false;
+          pushHistory(BAL_LABEL);
+          st.amixAB = { before: before, after: amixSnap() };
+          st.amixShow = 'after';
+          var parts = [];
+          if (beatTxt) parts.push(beatTxt);
+          if (R.dbl && res[R.dbl.id]) parts.push('doubles ' + fr1(A.layer.dbl, 0) + ' dB');
+          if (R.adlib && res[R.adlib.id]) parts.push('ad-libs ' + fr1(A.layer.adlib, 0) + ' dB');
+          if (R.harm.length) parts.push('harmonies ' + fr1(A.layer.harm, 0) + ' dB');
+          var bcTxt = balCheck ? ' ; voix − beat mesuré à l’export : ' + (balCheck.d2 >= 0 ? '+' : '') + fr1(balCheck.d2, 1) + ' dB (' + (balCheck.note ? 'après ' + balCheck.note : 'sans 2e passe') + ')' : '';
+          setStatus('Mixage auto appliqué : ' + parts.join(' ; ') + bcTxt + (note || '') + (skipped.length ? '. Non traité : ' + skipped.join(', ') : '') + '.');
+          renderMix();
+        };
+        if (A.target == null) { levelDone(''); return; }
+        setStatus('Mixage auto : réglage du niveau final…');
+        st.exporting = true;
+        renderLufs(sr).then(function (lu) {
+          if (isFinite(lu)) { st.masterDb = clamp(st.masterDb + (A.target - lu), -12, 12); applyMixLive(); }
+          levelDone(isFinite(lu) ? '. Niveau final : ' + lufsTxt(lu) + ' LUFS mesuré avant mastering, cible ' + lufsTxt(A.target) + ' (fader maître ' + dbText(st.masterDb) + ')' : '');
+        }).catch(function () { levelDone(''); });
+      });
+    }).catch(function (err) {
+      st.exporting = false;
+      setStatus('Équilibrage échoué : ' + ((err && err.message) || err), true);
+    });
+  }
+  // Avant / Après : rejoue l'état mémorisé (sans nouvelle entrée d'historique)
+  function amixAB(which) {
+    var AB = st.amixAB;
+    if (!AB) { setStatus('Applique d’abord le mixage auto pour comparer.', true); return; }
+    st.amixShow = which;
+    amixApply(which === 'before' ? AB.before : AB.after);
+    renderMix();
+  }
+  function amixPanel() { return st.ui.mix; }
+  // Feuille « Mixage auto » : réglages, Appliquer, Avant / Après
+  function buildShMix(body) {
+    var U = st.ui.mix = {};
+    U.intro = el('div', 'as-sync-src', 'Équilibre la voix, les doubles, les ad-libs et les harmonies par rapport au beat. Les réglages sont mémorisés par son.');
+    body.appendChild(U.intro);
+    function sec(title) { var s = el('div', 'as-sub', title); s.style.marginTop = '10px'; body.appendChild(s); }
+    sec('Voix et niveau final');
+    U.voice = vrow(body, 'Voix au-dessus du beat', -3, 8, 0.5);
+    U.voice.r.addEventListener('input', function () { st.amix.voice = +U.voice.r.value; U.voice.v.textContent = dbText(st.amix.voice).replace('-∞ dB', '−∞'); });
+    U.voice.r.addEventListener('change', function () { markDirty(); });
+    var rt = el('div', 'as-sync-row');
+    rt.appendChild(lbl('Niveau final'));
+    U.targets = [['Streaming −14', -14], ['Puissant −9', -9], ['Doux −16', -16], ['Ne pas régler', null]].map(function (d) {
+      var b = chip(d[0], 'Niveau final visé : ' + d[0], false, 'as-sgrid', function () { st.amix.target = d[1]; markDirty(); renderMix(); });
+      rt.appendChild(b);
+      return { k: d[1], b: b };
+    });
+    body.appendChild(rt);
+    sec('Écart des couches sous la voix');
+    U.dbl = vrow(body, 'Double', -12, 0, 0.5);
+    U.adlib = vrow(body, 'Ad-libs', -12, 0, 0.5);
+    U.harm = vrow(body, 'Harmonies', -16, 0, 0.5);
+    [[U.dbl, 'dbl'], [U.adlib, 'adlib'], [U.harm, 'harm']].forEach(function (q) {
+      q[0].r.addEventListener('input', function () { st.amix.layer[q[1]] = +q[0].r.value; q[0].v.textContent = dbText(st.amix.layer[q[1]]); });
+      q[0].r.addEventListener('change', function () { markDirty(); });
+    });
+    sec('Beat : ducking et creusement pour la voix');
+    U.duck = vrow(body, 'Ducking du beat', 0, 6, 0.5);
+    U.duckA = vrow(body, 'Attaque', 10, 200, 5);
+    U.duckR = vrow(body, 'Relâche', 50, 1000, 10);
+    U.dyn = vrow(body, 'Creuser à 3 kHz', 0, 4, 0.5);
+    [[U.duck, 'duck', 'dB'], [U.duckA, 'duckA', 'ms'], [U.duckR, 'duckR', 'ms'], [U.dyn, 'dyn', 'dB']].forEach(function (q) {
+      q[0].r.addEventListener('input', function () { st.amix[q[1]] = +q[0].r.value; q[0].v.textContent = q[2] === 'ms' ? Math.round(st.amix[q[1]]) + ' ms' : fr1(st.amix[q[1]], 1) + ' dB'; });
+      q[0].r.addEventListener('change', function () { markDirty(); renderMix(); });
+    });
+    U.warn = el('div', 'as-sync-info', 'Le ducking baisse le beat quand la voix chante ; le creusement retire un peu de 2–4 kHz du beat seulement pendant la voix. Les deux s’appliquent à la lecture et à l’export.');
+    body.appendChild(U.warn);
+    sec('Options');
+    var ro = el('div', 'as-sync-row');
+    U.section = swRow(ro, 'Analyse par section', 'Mesure la voix sur les passages chantés seulement (porte de silence)', function () { st.amix.section = !st.amix.section; markDirty(); renderMix(); });
+    U.keep = swRow(ro, 'Garder le mix équilibré', 'Relance l’équilibrage après chaque prise', function () { st.amix.keep = !st.amix.keep; markDirty(); renderMix(); });
+    body.appendChild(ro);
+    U.msg = el('div', 'as-sync-msg', '');
+    U.msg.setAttribute('role', 'status');
+    body.appendChild(U.msg);
+    var foot = el('div', 'as-sync-foot');
+    U.ab1 = chip('Avant', 'Écouter le mixage d’avant l’équilibrage', false, 'as-sab', function () { amixAB('before'); });
+    U.ab2 = chip('Après', 'Écouter le mixage équilibré', false, 'as-sab', function () { amixAB('after'); });
+    foot.appendChild(U.ab1); foot.appendChild(U.ab2);
+    U.apply = ibtn(foot, 'check', 'Appliquer', 'Équilibrer le mixage selon ces réglages', function () { autoMix(); });
+    ibtn(foot, 'close', 'Fermer', 'Fermer la feuille', function () { amixLeave(); });
+    body.appendChild(foot);
+  }
+  // Fermer : si l’écoute « Avant » est active, le mixage équilibré est rétabli
+  function amixLeave() {
+    if (st.amixShow === 'before' && st.amixAB) amixAB('after');
+    closeOv(st.ui.shMix);
+    renderBooth();
+  }
+  function openMix() {
+    if (!voiceTrack() || !clipsOf(voiceTrack().id).length) { setStatus('Enregistre d’abord une voix pour équilibrer le mixage.', true); return; }
+    openOv(st.ui.shMix);
+    renderMix();
+  }
+  function renderMix() {
+    var u = st.ui, U = u.mix;
+    if (!U || !st.amix || u.shMix.ov.hidden) return;
+    var A = st.amix;
+    if (document.activeElement !== U.voice.r) { U.voice.r.value = A.voice; }
+    U.voice.v.textContent = dbText(A.voice);
+    U.targets.forEach(function (o) { var on = o.k === A.target; o.b.classList.toggle('on', on); o.b.setAttribute('aria-pressed', on ? 'true' : 'false'); });
+    [[U.dbl, A.layer.dbl], [U.adlib, A.layer.adlib], [U.harm, A.layer.harm]].forEach(function (q) { q[0].r.value = q[1]; q[0].v.textContent = dbText(q[1]); });
+    U.duck.r.value = A.duck; U.duck.v.textContent = fr1(A.duck, 1) + ' dB';
+    U.duckA.r.value = A.duckA; U.duckA.v.textContent = Math.round(A.duckA) + ' ms';
+    U.duckR.r.value = A.duckR; U.duckR.v.textContent = Math.round(A.duckR) + ' ms';
+    U.dyn.r.value = A.dyn; U.dyn.v.textContent = fr1(A.dyn, 1) + ' dB';
+    setSw(U.section, A.section);
+    setSw(U.keep, A.keep);
+    U.ab1.disabled = !st.amixAB; U.ab2.disabled = !st.amixAB;
+    U.ab1.classList.toggle('on', st.amixShow === 'before'); U.ab2.classList.toggle('on', st.amixShow !== 'before' && !!st.amixAB);
+    U.apply.disabled = !!st.exporting || st.playing || st.recording;
+    U.msg.textContent = st.exporting ? 'Calcul en cours…' : '';
+  }
+  // Mixage du beat et des voix pendant l'enregistrement : appelé après chaque prise si « Garder le mix équilibré »
+  function amixAfterTake() {
+    if (!st.amix || !st.amix.keep) return;
+    setTimeout(function () { if (!st.recording && !st.recPending && !st.exporting) autoMix(); }, 30);
   }
 
   // ---------- API publique ----------
@@ -13657,6 +14845,9 @@ select.ie-in{width:auto}
     // Hook de test non documenté
     _debug: function () {
       return {
+        dbs: st.tracks.map(function (t) { return [t.id, +t.db.toFixed(3), !!t.muted]; }),
+        bpm: st.bpm, amix: st.amix,
+        instru: (function () { var c = instruClip(); if (!c) return null; var ie = ieOf(c); return { tS: +ie.tS.toFixed(4), tE: +ie.tE.toFixed(4), tempo: ie.tempo, semis: ie.semis, loop: ie.loop ? 1 : 0 }; })(),
         tracks: st.tracks.map(function (t) { return { id: t.id, type: t.type, name: t.name, clips: clipsOf(t.id).length, pan: t.pan, preset: t.preset || null, inserts: t.inserts.map(function (i) { return i ? i.type : null; }) }; }),
         clips: st.clips.map(function (c) { return { id: c.id, name: c.name, trackId: c.trackId, start: c.start, duration: c.duration, offset: c.offset, fadeIn: c.fadeIn, fadeOut: c.fadeOut, takeId: c.takeId || null, gainDb: c.gainDb }; }),
         markers: st.markers.map(function (m) { return { name: m.name, t: m.t }; }),
