@@ -4690,6 +4690,8 @@ select.ie-in{width:auto}
   var LAT_KEY = 'sf_audio_latency_ms';
   var LAT_MAX = 600;        // compensation de latence maximale (ms)
   var ROUTE_KEY = 'sf_audio_route_ok'; // stratégie de routage qui a marché (mémorisée)
+  var OUT_KEY = 'sf_audio_out';       // sortie audio choisie : { id, label } (setSinkId)
+  var MIC_KEY = 'sf_audio_mic';       // entrée micro choisie : { id, label }
   var ROUTE_ORDER = ['A', 'B', 'D', 'C']; // ordre des essais du test guidé
   var ROUTES = {
     A: { t: 'session « lecture + enregistrement » posée avant le micro', media: false },
@@ -4767,7 +4769,8 @@ select.ie-in{width:auto}
     masterDb: 0, exporting: false, resuming: false,
     undo: [], redo: [], last: null, lastSer: '', histTimer: null, histLabel: '',
     stripOpen: false, spot: null, narrow: false, sheet: false, redraw: false, anchor: null,
-    mic: { dev: '', voice: false, latency: 0, countIn: 0, monitor: false, monDb: 0, instru: 100, route: 'auto' },
+    mic: { dev: '', devLabel: '', voice: false, latency: 0, countIn: 0, monitor: false, monDb: 0, instru: 100, route: 'auto' },
+    sink: { id: '', label: '' }, // sortie audio : id appliqué (vide = défaut du système) et libellé mémorisé
     takes: [], // prises (buffer + paramètres) ; une prise active possède un clip dont takeId vaut son id
     projId: null, pname: '', bview: 'lib', pro: false, // son ouvert, nom, vue (bibliothèque / studio), mode pro
     key: null, // tonalité du projet : { t: 0..11, m: 0 majeur / 1 mineur } ; null = chromatique
@@ -4777,6 +4780,7 @@ select.ie-in{width:auto}
   };
   // Moteur d'enregistrement : flux micro, chaîne de capture, prise en cours, calibrage
   var rx = {
+    outs: [], // sorties audio (audiooutput) ; libellés après autorisation micro
     stream: null, key: '', src: null, an: null, buf: null, zero: null, mon: null,
     node: null, sp: null, nodeMode: '', modP: null,
     on: false, at: 0, ending: false, abort: false,
@@ -4862,6 +4866,7 @@ select.ie-in{width:auto}
       var AC = window.AudioContext || window.webkitAudioContext;
       st.ctx = new AC();
       st.ctx.onstatechange = function () { renderTransport(); };
+      if (st.sink.id) applySink(); // sortie mémorisée (casque) : appliquée à la création du contexte
     }
     return st.ctx;
   }
@@ -6244,6 +6249,9 @@ select.ie-in{width:auto}
     return md.enumerateDevices().then(function (list) {
       rx.devs = list.filter(function (d) { return d.kind === 'audioinput'; })
         .map(function (d) { return { deviceId: d.deviceId, label: d.label || '' }; });
+      // Entrée mémorisée : retrouvée par identifiant, sinon par libellé (l'identifiant peut changer)
+      var m = findDev(rx.devs, { id: st.mic.dev, label: st.mic.devLabel });
+      if (m) { st.mic.dev = m.deviceId; st.mic.devLabel = m.label; }
       return rx.devs;
     }).catch(function () { rx.devs = []; return []; });
   }
@@ -6257,14 +6265,184 @@ select.ie-in{width:auto}
       var o0 = el('option', null, 'Par défaut du système'); o0.value = '';
       sel.appendChild(o0);
       ins.forEach(function (d, i) {
-        var o = el('option', null, d.label || ('Entrée ' + (i + 1)));
+        var o = el('option', null, micOptLabel(d, i));
         o.value = d.deviceId;
         sel.appendChild(o);
       });
+      // Entrée absente (débranchée) : retour au défaut, libellé gardé pour la retrouver au retour
       if (st.mic.dev && !ins.some(function (d) { return d.deviceId === st.mic.dev; })) st.mic.dev = '';
       sel.value = st.mic.dev;
+      syncMicNote();
     }).catch(noop);
+    loadOuts().then(function () { matchSink(); fillOutOpts(); syncOutUI(); }).catch(noop);
   }
+  // Libellé d'une entrée ; le micro de l’iPhone utilisé comme micro du Mac (Continuité) est nommé
+  function micOptLabel(d, i) {
+    if (!isIOSDev() && /iphone/i.test(d.label || '')) return 'Micro de l’iPhone (Continuité)';
+    return d.label || ('Entrée ' + (i + 1));
+  }
+  function labelOfIn(id) {
+    var ins = rx.devs || [], i;
+    for (i = 0; i < ins.length; i++) if (ins[i].deviceId === id) return ins[i].label || '';
+    return '';
+  }
+  function syncMicNote() {
+    var s = st.ui.sh;
+    if (!s || !s.devNote) return;
+    var m = micDevNow(), d = null, i, ins = rx.devs || [];
+    for (i = 0; i < ins.length; i++) if (ins[i].deviceId === m) d = ins[i];
+    var isPh = !!d && !isIOSDev() && /iphone/i.test(d.label || '');
+    s.devNote.textContent = isPh ? 'Micro de l’iPhone (Continuité) : le Mac enregistre la voix avec l’iPhone.' : '';
+    s.devNote.hidden = !isPh;
+  }
+  // ---------- Sortie audio (casque Bluetooth, haut-parleurs) : AudioContext.setSinkId ----------
+  function isIOSDev() {
+    var ua = navigator.userAgent || '';
+    return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
+  function sinkCtxOk() {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    return !!(AC && AC.prototype && typeof AC.prototype.setSinkId === 'function');
+  }
+  function sinkElOk() {
+    return typeof HTMLMediaElement !== 'undefined' && typeof HTMLMediaElement.prototype.setSinkId === 'function';
+  }
+  function loadPick(key) {
+    try {
+      var v = JSON.parse(window.localStorage.getItem(key) || 'null');
+      return v && typeof v === 'object' ? { id: String(v.id || ''), label: String(v.label || '') } : null;
+    } catch (e) { return null; }
+  }
+  function savePick(key, id, label) {
+    try { window.localStorage.setItem(key, JSON.stringify({ id: id || '', label: label || '' })); } catch (e) { /* stockage indisponible */ }
+  }
+  // Retrouve un appareil mémorisé : par identifiant, sinon par libellé
+  function findDev(list, pick) {
+    if (!pick || (!pick.id && !pick.label)) return null;
+    var i;
+    if (pick.id) for (i = 0; i < list.length; i++) if (list[i].deviceId === pick.id) return list[i];
+    if (pick.label) for (i = 0; i < list.length; i++) if (list[i].label && list[i].label === pick.label) return list[i];
+    return null;
+  }
+  function loadOuts() {
+    var md = navigator.mediaDevices;
+    if (!md || !md.enumerateDevices) return Promise.resolve([]);
+    return md.enumerateDevices().then(function (list) {
+      rx.outs = list.filter(function (d) { return d.kind === 'audiooutput' && d.deviceId !== 'default'; })
+        .map(function (d) { return { deviceId: d.deviceId, label: d.label || '' }; });
+      return rx.outs;
+    }).catch(function () { rx.outs = []; return []; });
+  }
+  // Applique la sortie choisie au contexte unique (tout le rendu passe par sa destination) et aux éléments audio
+  function applySink() { applyCtxSink(); applyElSink(); }
+  function applyCtxSink() {
+    if (!st.ctx || !sinkCtxOk()) return;
+    try {
+      var p = st.ctx.setSinkId(st.sink.id || '');
+      if (p && p.catch) p.catch(sinkFail);
+    } catch (e) { sinkFail(e); }
+  }
+  function applyElSink() {
+    if (!rx.el || !sinkElOk()) return;
+    try {
+      var p = rx.el.setSinkId(st.sink.id || '');
+      if (p && p.catch) p.catch(sinkFail);
+    } catch (e) { sinkFail(e); }
+  }
+  // Sortie refusée (appareil disparu ou non accepté) : retour au défaut du système, avec un message
+  function sinkFail() {
+    if (!st.sink.id) return;
+    var name = st.sink.label || 'la sortie choisie';
+    st.sink.id = '';
+    applySink();
+    setStatus('« ' + name + ' » n’est pas disponible : sortie revenue au défaut du système.', true);
+    syncOutUI();
+  }
+  // Après un changement d'appareils : la sortie mémorisée revient si l'appareil est là, sinon défaut + message
+  function matchSink() {
+    var list = rx.outs || [], cur = st.sink;
+    if (!cur.id && !cur.label) return;
+    var d = findDev(list, cur);
+    if (d) {
+      if (d.deviceId !== cur.id) { cur.id = d.deviceId; cur.label = d.label || cur.label; applySink(); }
+      return;
+    }
+    var labelled = list.some(function (x) { return !!x.label; });
+    if (!labelled || !cur.id) return; // liste sans libellés (autorisation non donnée) : on ne conclut rien
+    cur.id = '';
+    applySink();
+    setStatus('« ' + (cur.label || 'Le casque') + ' » n’est plus connecté : sortie revenue au défaut du système.', true);
+  }
+  // Choix d'une sortie dans le menu (mémorisé)
+  function pickOut(id) {
+    var list = rx.outs || [], d = null, i;
+    for (i = 0; i < list.length; i++) if (list[i].deviceId === id) d = list[i];
+    st.sink = { id: id || '', label: d ? (d.label || '') : '' };
+    savePick(OUT_KEY, st.sink.id, st.sink.label);
+    applySink();
+    setStatus(st.sink.id ? 'Sortie : ' + (st.sink.label || 'appareil choisi') + '.' : 'Sortie : par défaut du système.');
+    syncOutUI();
+  }
+  // Accord d'1 s sur la sortie choisie (même chaîne que le reste : destination du contexte)
+  function testSink() {
+    var c = getCtx();
+    if (c.state !== 'running') c.resume().catch(noop);
+    applySink();
+    var t0 = c.currentTime + 0.05, g = c.createGain();
+    g.gain.value = 0.2; g.connect(c.destination);
+    CHORD.forEach(function (f) { var o = c.createOscillator(); o.frequency.value = f; o.connect(g); o.start(t0); o.stop(t0 + 1); });
+    setStatus('Accord de test joué sur : ' + (st.sink.id ? (st.sink.label || 'la sortie choisie') : 'la sortie par défaut') + '.');
+  }
+  // Menu des sorties (libellés après autorisation micro)
+  function fillOutOpts() {
+    (st.ui.outUI || []).forEach(function (u) {
+      var list = rx.outs || [];
+      u.sel.innerHTML = '';
+      var o0 = el('option', null, 'Par défaut du système'); o0.value = '';
+      u.sel.appendChild(o0);
+      list.forEach(function (d, i) {
+        var o = el('option', null, d.label || ('Sortie ' + (i + 1)));
+        o.value = d.deviceId;
+        u.sel.appendChild(o);
+      });
+    });
+  }
+  // Valeur affichée, lignes visibles et avertissements de la section Sortie
+  function syncOutUI() {
+    var sup = sinkCtxOk();
+    var micId = micDevNow(), micLabel = '', i, ins = rx.devs || [];
+    for (i = 0; i < ins.length; i++) if (ins[i].deviceId === micId) micLabel = ins[i].label;
+    var sinkLabel = st.sink.id ? st.sink.label : '';
+    var same = !!sinkLabel && sinkLabel === micLabel && BT_RE.test(sinkLabel);
+    (st.ui.outUI || []).forEach(function (u) {
+      u.sel.value = st.sink.id || '';
+      u.row.hidden = !sup;
+      u.unsup.hidden = sup;
+      u.warn.hidden = !same;
+    });
+  }
+  // Section « Sortie audio » : menu, test, avertissements (absente sur iPhone / iPad)
+  function buildOutBody() {
+    var u = { };
+    var box = el('div', 'as-outbody');
+    box.appendChild(el('div', 'as-note', 'Choisis ton casque en sortie et ton micro en entrée.'));
+    u.row = el('div', 'as-row');
+    u.sel = el('select', 'as-dev');
+    u.sel.title = 'Sortie audio';
+    u.sel.setAttribute('aria-label', 'Sortie audio');
+    u.sel.addEventListener('change', function () { pickOut(u.sel.value); });
+    u.row.appendChild(u.sel);
+    ibtn(u.row, 'speaker', 'Tester la sortie', 'Joue un accord de 1 s sur la sortie choisie', testSink, 'as-wide');
+    box.appendChild(u.row);
+    u.unsup = el('div', 'as-note-b', 'Le choix de sortie n’est pas disponible dans ce navigateur : utilise Chrome ou Edge sur ordinateur, ou règle la sortie dans le système.');
+    box.appendChild(u.unsup);
+    u.warn = el('div', 'as-warn', 'Le micro du casque Bluetooth dégrade la qualité ; choisis un autre micro.');
+    u.warn.hidden = true;
+    box.appendChild(u.warn);
+    (st.ui.outUI = st.ui.outUI || []).push(u);
+    return box;
+  }
+
   // Crée (une seule fois) le nœud de capture : AudioWorklet, sinon ScriptProcessor, sinon MediaRecorder
   function ensureCapture(c) {
     if (rx.node || rx.sp || rx.nodeMode === 'mr') return Promise.resolve();
@@ -6422,7 +6600,10 @@ select.ie-in{width:auto}
     return st.tracks.some(function (t) { return driving(t, 'vol') || driving(t, 'pan'); });
   }
   function mediaEl() {
-    if (!rx.el) { rx.el = new Audio(); rx.el.preload = 'auto'; rx.el.setAttribute('playsinline', ''); }
+    if (!rx.el) {
+      rx.el = new Audio(); rx.el.preload = 'auto'; rx.el.setAttribute('playsinline', '');
+      if (st.sink.id) applyElSink(); // l'élément suit la sortie choisie (stratégie D)
+    }
     return rx.el;
   }
   // Appelé dans le geste utilisateur : débloque l'élément (son silencieux de 0,1 s)
@@ -6773,6 +6954,8 @@ select.ie-in{width:auto}
     if (document.activeElement !== s.bpm) s.bpm.value = st.bpm;
     s.pro.classList.toggle('on', !!st.pro);
     s.pro.setAttribute('aria-pressed', st.pro ? 'true' : 'false');
+    syncMicNote();
+    syncOutUI();
   }
 
   // Niveau d'entrée (vumètre) : pic et RMS du flux micro, mis à jour à chaque image
@@ -8599,13 +8782,28 @@ select.ie-in{width:auto}
     var s = {};
     st.ui.sh = s;
 
+    // Sortie (casque, haut-parleurs) : absente sur iPhone / iPad, où rien ne change
+    if (!isIOSDev()) {
+      var secOut = secEl('Sortie audio');
+      secOut.appendChild(buildOutBody());
+      sh.appendChild(secOut);
+    }
+
     // Entrée
     var secIn = secEl('Entrée micro');
     s.dev = el('select', 'as-dev');
     s.dev.title = 'Entrée audio';
     s.dev.setAttribute('aria-label', 'Entrée audio');
-    s.dev.addEventListener('change', function () { st.mic.dev = s.dev.value; micSettingsChanged(); });
+    s.dev.addEventListener('change', function () {
+      st.mic.dev = s.dev.value;
+      st.mic.devLabel = labelOfIn(st.mic.dev);
+      savePick(MIC_KEY, st.mic.dev, st.mic.devLabel);
+      micSettingsChanged();
+    });
     secIn.appendChild(s.dev);
+    s.devNote = el('div', 'as-note');
+    s.devNote.hidden = true;
+    secIn.appendChild(s.devNote);
     secIn.appendChild(el('div', 'as-note', 'Sur iPhone, iOS peut imposer l’entrée selon le casque connecté.'));
     var vrow = el('div', 'as-row');
     s.voice = chip('Traitement voix (anti-écho)', 'Annulation d’écho, suppression de bruit et contrôle de gain. Désactivé par défaut : signal brut.', st.mic.voice, 'as-wide', function () {
@@ -9897,6 +10095,12 @@ select.ie-in{width:auto}
       u.hp[k] = b; hps.appendChild(b);
     });
     body.appendChild(hps);
+    if (!isIOSDev()) {
+      var outSec = el('div', 'as-sec');
+      outSec.appendChild(el('div', 'as-sec-l', 'Sortie audio'));
+      outSec.appendChild(buildOutBody());
+      body.appendChild(outSec);
+    }
     u.btNote = el('div', 'as-note-b', 'Le micro du casque Bluetooth enregistre en qualité réduite ; si possible, chante dans le micro de l’iPhone.');
     u.noneNote = el('div', 'as-note-b', 'Sans casque, l’instru sort des haut-parleurs et sera captée par le micro : elle se retrouvera dans ta prise. Le retour micro est coupé.');
     u.btmixNote = el('div', 'as-note-b', 'L’instru sort dans ton casque Bluetooth, et ta voix est captée par le micro de l’iPhone. Safari ne garantit pas cette combinaison : lance le test pour vérifier.');
@@ -11416,7 +11620,8 @@ select.ie-in{width:auto}
   }
   function bindDevices() {
     var md = navigator.mediaDevices;
-    if (md && md.addEventListener) md.addEventListener('devicechange', function () { if (st.sheet) refreshDevices(); });
+    // Branchement / débranchement : listes à jour, sortie mémorisée rétablie ou ramenée au défaut
+    if (md && md.addEventListener) md.addEventListener('devicechange', function () { refreshDevices(); });
   }
   // Largeur d'écran : en-tête de piste réduit et mise en page mobile
   function bindNarrow() {
@@ -12025,6 +12230,9 @@ select.ie-in{width:auto}
     st.last = snapshot(); st.lastSer = serial(st.last);
     st.mic.latency = loadLatency();
     st.booth.hp = loadHP();
+    var pOut = loadPick(OUT_KEY), pMic = loadPick(MIC_KEY);
+    if (pOut) st.sink = pOut;
+    if (pMic) { st.mic.dev = pMic.id; st.mic.devLabel = pMic.label; }
     st.pro = loadPro();
     loadLyrPrefs();
     showTab(st.narrow ? 'booth' : 'edit');
