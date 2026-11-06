@@ -4703,8 +4703,8 @@ select.ie-in{width:auto}
   var HOT_PEAK = 0.8913;    // -1 dBFS : seuil « Trop fort »
   var CAL_N = 8, CAL_STEP = 0.75; // calibrage : 8 clics, un toutes les 0,75 s
   var TRACK_COLORS = ['#7c5cff', '#2bb3a3', '#e0a526', '#e05a7a', '#4fa3e0', '#8bc34a', '#ff8a4c', '#b07cff'];
-  var INSERT_OPTS = [['', 'Aucun'], ['eq', 'EQ 3 bandes'], ['comp', 'Compresseur'], ['reverb', 'Reverb'], ['delay', 'Delay'], ['dist', 'Distorsion'], ['chorus', 'Chœur large'], ['vocoder', 'Vocodeur']];
-  var INSERT_LABEL = { eq: 'EQ 3 bandes', comp: 'Compresseur', reverb: 'Reverb', delay: 'Delay', dist: 'Distorsion', chorus: 'Chœur large', vocoder: 'Vocodeur' };
+  var INSERT_OPTS = [['', 'Aucun'], ['eq', 'EQ 3 bandes'], ['comp', 'Compresseur'], ['reverb', 'Reverb'], ['delay', 'Delay'], ['dist', 'Distorsion'], ['chorus', 'Chœur large'], ['vocoder', 'Vocodeur'], ['pro', 'Voix pro']];
+  var INSERT_LABEL = { eq: 'EQ 3 bandes', comp: 'Compresseur', reverb: 'Reverb', delay: 'Delay', dist: 'Distorsion', chorus: 'Chœur large', vocoder: 'Vocodeur', pro: 'Voix pro' };
   var INSERT_DEFAULTS = {
     eq: { low: 0, mid: 0, high: 0 },
     comp: { threshold: -24, ratio: 4, attack: 0.003, release: 0.25 },
@@ -4712,7 +4712,8 @@ select.ie-in{width:auto}
     delay: { time: 0.3, feedback: 0.4, mix: 0.3 },
     dist: { amount: 30 },
     chorus: { mix: 0.35 },
-    vocoder: { octave: 0, mix: 0.9 }
+    vocoder: { octave: 0, mix: 0.9 },
+    pro: { thr: -28, gain: 0 }
   };
   var INSERT_SCHEMA = {
     eq: [
@@ -4725,6 +4726,10 @@ select.ie-in{width:auto}
       { k: 'ratio', label: 'Ratio', min: 1, max: 20, step: 0.5 },
       { k: 'attack', label: 'Attaque (s)', min: 0, max: 0.5, step: 0.001 },
       { k: 'release', label: 'Relâchement (s)', min: 0.01, max: 1, step: 0.01 }
+    ],
+    pro: [
+      { k: 'thr', label: 'Seuil du compresseur (dB)', min: -60, max: -6, step: 0.5 },
+      { k: 'gain', label: 'Normalisation (dB)', min: -12, max: 18, step: 0.5 }
     ],
     reverb: [
       { k: 'duration', label: 'Durée (s)', min: 0.2, max: 6, step: 0.1 },
@@ -4769,7 +4774,7 @@ select.ie-in{width:auto}
     masterDb: 0, exporting: false, resuming: false,
     undo: [], redo: [], last: null, lastSer: '', histTimer: null, histLabel: '',
     stripOpen: false, spot: null, narrow: false, sheet: false, redraw: false, anchor: null,
-    mic: { dev: '', devLabel: '', voice: false, latency: 0, countIn: 0, monitor: false, monDb: 0, instru: 100, route: 'auto' },
+    mic: { dev: '', devLabel: '', voice: false, latency: 0, countIn: 0, monitor: false, monDb: 0, instru: 100, route: 'auto', inGain: 0 },
     sink: { id: '', label: '' }, // sortie audio : id appliqué (vide = défaut du système) et libellé mémorisé
     takes: [], // prises (buffer + paramètres) ; une prise active possède un clip dont takeId vaut son id
     projId: null, pname: '', bview: 'lib', pro: false, // son ouvert, nom, vue (bibliothèque / studio), mode pro
@@ -5268,6 +5273,34 @@ select.ie-in{width:auto}
       }
       node.input = vIn; node.output = vOut;
       node.update = function (q) { vDry.gain.value = 1 - q.mix; vWet.gain.value = q.mix * 0.7; };
+    } else if (ins.type === 'pro') {
+      // Chaîne « Voix pro » : passe-haut 90 Hz (12 dB/oct), de-esser (bande 5–8 kHz, réduction parallèle),
+      // compresseur 3,5:1, EQ (boue −2 dB à 300 Hz, présence +3 dB à 4 kHz, air +2 dB à 11 kHz),
+      // normalisation (gain q.gain), limiteur −1 dBFS.
+      var pIn = nd(c.createGain()), pHp = nd(c.createBiquadFilter()), pDry = nd(c.createGain());
+      var pBp = nd(c.createBiquadFilter()), pDc = nd(c.createDynamicsCompressor()), pDn = nd(c.createGain());
+      var pSum = nd(c.createGain()), pCp = nd(c.createDynamicsCompressor());
+      var pMud = nd(c.createBiquadFilter()), pPres = nd(c.createBiquadFilter()), pAir = nd(c.createBiquadFilter());
+      var pNorm = nd(c.createGain()), pLim = nd(c.createDynamicsCompressor());
+      pHp.type = 'highpass'; pHp.frequency.value = 90; pHp.Q.value = 0.7071;
+      pBp.type = 'bandpass'; pBp.frequency.value = 6500; pBp.Q.value = 1.2;
+      pDc.threshold.value = -30; pDc.knee.value = 6; pDc.ratio.value = 4; pDc.attack.value = 0.002; pDc.release.value = 0.06;
+      pDn.gain.value = -1;
+      pCp.knee.value = 6; pCp.ratio.value = 3.5; pCp.attack.value = 0.006; pCp.release.value = 0.08;
+      pMud.type = 'peaking'; pMud.frequency.value = 300; pMud.Q.value = 1; pMud.gain.value = -2;
+      pPres.type = 'peaking'; pPres.frequency.value = 4000; pPres.Q.value = 1; pPres.gain.value = 3;
+      pAir.type = 'highshelf'; pAir.frequency.value = 11000; pAir.gain.value = 2;
+      pLim.threshold.value = -1; pLim.knee.value = 0; pLim.ratio.value = 20; pLim.attack.value = 0.002; pLim.release.value = 0.1;
+      pIn.connect(pHp);
+      pHp.connect(pDry); pDry.connect(pSum);
+      pHp.connect(pBp); pBp.connect(pDc); pDc.connect(pSum);
+      pBp.connect(pDn); pDn.connect(pSum);
+      pSum.connect(pCp); pCp.connect(pMud); pMud.connect(pPres); pPres.connect(pAir); pAir.connect(pNorm); pNorm.connect(pLim);
+      node.input = pIn; node.output = pLim;
+      node.update = function (q) {
+        pCp.threshold.value = clamp(q.thr == null ? -28 : q.thr, -60, -6);
+        pNorm.gain.value = dbToGain(clamp(q.gain || 0, -12, 18));
+      };
     } else {
       return null;
     }
@@ -6139,11 +6172,13 @@ select.ie-in{width:auto}
     renderBooth();
   }
   // Casque « micro iPhone » (btmix) : traitement voix jamais forcé (sinon iOS bascule en mode appel)
-  function voiceOn() { return !!st.mic.voice && st.booth.hp !== 'btmix'; }
+  // Anti-écho : voulu (« Sans casque ») ou automatique quand la sortie est un haut-parleur
+  function voiceOn() { return (!!st.mic.voice || outIsSpeakers()) && st.booth.hp !== 'btmix'; }
+  // Contraintes : casque -> traitement désactivé, mono, 48 kHz demandés ; haut-parleurs -> anti-écho et suppression de bruit
   function micConstraints(simple, dev) {
     if (simple) return { audio: true };
     var v = voiceOn();
-    var a = { echoCancellation: v, noiseSuppression: v, autoGainControl: v };
+    var a = { echoCancellation: v, noiseSuppression: v, autoGainControl: false, channelCount: 1, sampleRate: { ideal: 48000 } };
     if (dev) a.deviceId = { exact: dev };
     return { audio: a };
   }
@@ -6189,8 +6224,8 @@ select.ie-in{width:auto}
   // Ferme le micro. Appelé aussi quand les réglages d'entrée changent.
   function closeMic() {
     if (rx.stream) rx.stream.getTracks().forEach(function (t) { t.stop(); });
-    disc(rx.src); disc(rx.an); disc(rx.zero); disc(rx.mon); disc(rx.node); disc(rx.sp);
-    rx.stream = null; rx.key = ''; rx.src = null; rx.an = null; rx.zero = null; rx.mon = null;
+    disc(rx.src); disc(rx.ig); disc(rx.an); disc(rx.zero); disc(rx.mon); disc(rx.node); disc(rx.sp);
+    rx.stream = null; rx.key = ''; rx.src = null; rx.ig = null; rx.an = null; rx.zero = null; rx.mon = null;
     rx.node = null; rx.sp = null; rx.nodeMode = '';
   }
   // IMPORTANT : getUserMedia est appelé de façon synchrone (même geste que ctx.resume(), exigence iOS)
@@ -6230,11 +6265,14 @@ select.ie-in{width:auto}
       if (tr && tr.label) rx.labels = true; // libellés disponibles : pas de premier essai nécessaire
       rx.stream = stream; rx.key = key; st.booth.micErr = false;
       rx.src = c.createMediaStreamSource(stream);
+      // Gain d'entrée numérique (test « Vérifier ma voix ») : avant le vumètre, le retour et la capture
+      rx.ig = c.createGain(); rx.ig.gain.value = dbToGain(st.mic.inGain || 0);
       rx.an = c.createAnalyser(); rx.an.fftSize = 2048; rx.buf = new Float32Array(2048);
       rx.zero = c.createGain(); rx.zero.gain.value = 0;
       rx.mon = c.createGain(); rx.mon.gain.value = 0;
-      rx.src.connect(rx.an); rx.an.connect(rx.zero);
-      rx.src.connect(rx.mon); rx.mon.connect(c.destination);
+      rx.src.connect(rx.ig);
+      rx.ig.connect(rx.an); rx.an.connect(rx.zero);
+      rx.ig.connect(rx.mon); rx.mon.connect(c.destination);
       rx.zero.connect(c.destination);
       applyMicGains();
       refreshDevices();
@@ -6295,6 +6333,249 @@ select.ie-in{width:auto}
     s.devNote.textContent = isPh ? 'Micro de l’iPhone (Continuité) : le Mac enregistre la voix avec l’iPhone.' : '';
     s.devNote.hidden = !isPh;
   }
+  // ---------- Diagnostic casque / micro, vérification de la voix, « Voix pro » ----------
+  // Libellés d'entrée Bluetooth (« Hands-Free », « Casque », « Mains libres »…) ; le nom de la sortie Bluetooth est aussi testé
+  var IN_BT_RE = /hands-free|handsfree|headset|mains libres|casque|bluetooth|headphone|ag audio|écouteur|ecouteur/i;
+  var OUT_SPK_RE = /speaker|haut-parleur|realtek|hdmi|built-in|intégré|integre/i;
+  var IN_WIRED_RE = /earpods|filaire|wired|lightning|jack|usb-c/i;
+  var DEV_STOP_RE = /^(stereo|audio|realtek|hands|free|ag|the|les|mains|libres|casque|microphone|réseau|reseau|de|des|haut|parleurs|speakers|bluetooth|headset|array)$/;
+  var VPRO_KEY = 'sf_voice_pro';   // chaîne « Voix pro » activée par défaut
+  var MICGAIN_KEY = 'sf_mic_gain'; // gain d'entrée numérique (dB), réglé par « Vérifier ma voix »
+  var WHY_TXT = 'Un casque Bluetooth qui sert aussi de micro passe en mode « mains libres » (HFP) : sa stéréo devient mono et dégradée. Le mode stéréo (A2DP) ne garde que la sortie : garde le casque en sortie et le micro du PC en entrée. '
+    + 'Astuce Windows : Paramètres › Bluetooth et appareils › Appareils › Plus de paramètres d’appareils › Propriétés du casque › Services › décocher « Téléphonie mains libres » pour forcer la qualité stéréo (le micro du casque ne sera alors plus disponible ; réversible).';
+  var VC = { busy: false, res: null, msg: '', tok: 0 };
+  var VP = { tok: 0 };
+  function loadInGain() { try { var v = parseFloat(window.localStorage.getItem(MICGAIN_KEY)); return isFinite(v) ? clamp(v, 0, 24) : 0; } catch (e) { return 0; } }
+  function saveInGain() { try { window.localStorage.setItem(MICGAIN_KEY, String(st.mic.inGain)); } catch (e) { /* stockage indisponible */ } }
+  function vproOn() { try { return window.localStorage.getItem(VPRO_KEY) !== '0'; } catch (e) { return true; } }
+  function saveVPro(on) { try { window.localStorage.setItem(VPRO_KEY, on ? '1' : '0'); } catch (e) { /* stockage indisponible */ } }
+  function outLabelNow() { return st.sink.id ? (st.sink.label || '') : ''; }
+  // Sortie choisie = haut-parleur (libellé « Haut-parleurs », « Speakers », « Realtek », « HDMI »…)
+  function outIsSpeakers() { var l = outLabelNow(); return !!l && OUT_SPK_RE.test(l); }
+  function devWords(s) {
+    return String(s || '').toLowerCase().replace(/[^a-z0-9àâäéèêëîïôöùûüç]+/g, ' ').split(' ')
+      .filter(function (w) { return w.length >= 3 && !DEV_STOP_RE.test(w); });
+  }
+  // Même appareil physique ? (« JBL Tune 510BT » en sortie et « Casque (JBL Tune 510BT ...) » en entrée)
+  function sameDevice(a, b) {
+    var wa = devWords(a), wb = devWords(b), n = 0, i;
+    for (i = 0; i < wa.length; i++) if (wb.indexOf(wa[i]) >= 0) n++;
+    return n >= 2 || (n >= 1 && wa.length === 1);
+  }
+  function inLabelNow() { var m = micDevNow(), ins = rx.devs || [], i; for (i = 0; i < ins.length; i++) if (ins[i].deviceId === m) return ins[i].label || ''; return ''; }
+  function yn(v) { return v == null ? '?' : (v ? 'oui' : 'non'); }
+  function trackReal() {
+    var tr = rx.stream && rx.stream.getAudioTracks ? rx.stream.getAudioTracks()[0] : null;
+    if (!tr || !tr.getSettings) return 'Micro fermé : les réglages réels apparaîtront à l’ouverture.';
+    var s = tr.getSettings();
+    return 'Réel (lu sur le micro ouvert) : écho ' + yn(s.echoCancellation) + ' · suppression du bruit ' + yn(s.noiseSuppression)
+      + ' · gain auto ' + yn(s.autoGainControl) + ' · ' + (s.sampleRate ? Math.round(s.sampleRate) + ' Hz' : 'fréquence inconnue');
+  }
+  // Verdict du couple sortie / entrée. Le test « Vérifier ma voix » est le juge final (mode appel détecté).
+  function diagPair() {
+    var outL = outLabelNow(), inL = inLabelNow(), outBT = !!outL && BT_RE.test(outL), outSpk = outIsSpeakers();
+    var inBT = !!inL && (IN_BT_RE.test(inL) || (outBT && sameDevice(outL, inL)));
+    var phone = !!VC.res && VC.res.key === micDevNow() && VC.res.phone;
+    if (inBT || phone) return { lvl: 'red', title: 'Mode appel détecté',
+      text: 'Le micro du casque Bluetooth fait passer ton casque en mode appel : l’instru sera dégradée et ta voix faible. Choisis le micro du PC (ou un micro USB) en entrée et garde le casque en sortie.', fix: true };
+    if (outSpk && !(inL && IN_WIRED_RE.test(inL))) return { lvl: 'orange', title: 'Instru captée par le micro',
+      text: 'L’instru des haut-parleurs sera captée par le micro. Mets un casque, ou active Anti-écho + Retirer l’instru captée (activés automatiquement).', fix: false };
+    if (outBT && inL) return { lvl: 'green', title: 'Configuration idéale',
+      text: 'Casque Bluetooth en sortie, micro du PC en entrée : la qualité stéréo est conservée.', fix: false, lat: true };
+    return { lvl: 'none', title: 'Diagnostic', text: 'Choisis une sortie (casque) et une entrée (micro du PC) pour vérifier la configuration.', fix: false };
+  }
+  // Entrée automatique : micro non Bluetooth (Microphone Array, Realtek, USB…) ; sortie : casque Bluetooth
+  function autoFixPair() {
+    var ins = (rx.devs || []).filter(function (d) { return d.label && !BT_RE.test(d.label); }), pick = null, prefs = [/microphone array|réseau de microphones|reseau de microphones/i, /realtek/i, /usb/i, /micro|intégré|built-in/i], i, j;
+    for (i = 0; i < prefs.length && !pick; i++) for (j = 0; j < ins.length && !pick; j++) if (prefs[i].test(ins[j].label)) pick = ins[j];
+    if (!pick && ins.length) pick = ins[0];
+    if (!pick) { setStatus('Aucune entrée non Bluetooth trouvée : choisis le micro du PC dans Entrée micro.', true); return; }
+    st.mic.dev = pick.deviceId; st.mic.devLabel = pick.label; savePick(MIC_KEY, pick.deviceId, pick.label);
+    var bt = (rx.outs || []).filter(function (d) { return BT_RE.test(d.label || ''); })[0];
+    if (bt) pickOut(bt.deviceId);
+    VC.res = null;
+    micSettingsChanged();
+    setStatus('Entrée : ' + pick.label + (bt ? ' · sortie : ' + bt.label : '') + '. Lance « Vérifier ma voix » pour confirmer.');
+    updateDiags();
+  }
+  function buildDiag(parent) {
+    var d = { box: el('div', 'as-diag'), main: el('div', 'as-diag-main') };
+    d.t = el('div', 'as-diag-t'); d.x = el('div', 'as-diag-x'); d.real = el('div', 'as-diag-real');
+    d.main.appendChild(d.t); d.main.appendChild(d.x); d.main.appendChild(d.real);
+    d.fix = cbtn(null, 'check', 'Corriger automatiquement', 'keep', autoFixPair);
+    d.lat = cbtn(null, 'bt', 'Appliquer la latence Bluetooth (250 ms)', '', function () { setLatency(250); });
+    d.why = el('button', 'as-link', 'Pourquoi ?'); d.why.type = 'button';
+    d.whyTxt = el('div', 'as-note-b', WHY_TXT); d.whyTxt.hidden = true;
+    d.why.addEventListener('click', function () { d.whyTxt.hidden = !d.whyTxt.hidden; });
+    var acts = el('div', 'as-gopts'); acts.appendChild(d.fix); acts.appendChild(d.lat);
+    d.main.appendChild(acts); d.main.appendChild(d.why); d.main.appendChild(d.whyTxt);
+    d.box.appendChild(d.main);
+    d.vBtn = cbtn(null, 'test', 'Vérifier ma voix', '', voiceCheck);
+    d.box.appendChild(d.vBtn);
+    d.vRes = el('div', 'as-vres'); d.vRes.hidden = true;
+    d.box.appendChild(d.vRes);
+    (st.ui.diags = st.ui.diags || []).push(d);
+    parent.appendChild(d.box);
+    return d;
+  }
+  function updateDiags() {
+    if (!st.ui.diags) return;
+    var ios = isIOSDev(), dg = ios ? null : diagPair();
+    st.ui.diags.forEach(function (d) {
+      d.main.hidden = ios;
+      if (dg) {
+        d.box.className = 'as-diag as-diag-' + dg.lvl;
+        d.t.textContent = dg.title; d.x.textContent = dg.text;
+        d.real.textContent = trackReal();
+        d.fix.hidden = !dg.fix;
+        d.lat.hidden = !(dg.lat && st.mic.latency !== 250);
+        d.why.hidden = dg.lvl !== 'red' && dg.lvl !== 'orange' && dg.lvl !== 'green';
+      }
+      d.vBtn.disabled = VC.busy || !!st.recording || !!st.recPending;
+      d.vBtn._lbl.textContent = VC.busy ? 'Vérification…' : 'Vérifier ma voix';
+      var r = VC.res;
+      if (VC.busy) { d.vRes.hidden = false; d.vRes.className = 'as-vres'; d.vRes.textContent = VC.msg; }
+      else if (r) { d.vRes.hidden = false; d.vRes.className = 'as-vres as-vres-' + r.verdict.lvl; d.vRes.textContent = r.verdict.title + ' — ' + r.verdict.text + (r.lines.length ? ' ' + r.lines.join(' ') : ''); }
+      else d.vRes.hidden = true;
+    });
+  }
+  // Analyse d'un enregistrement de test (x : mono, sr : fréquence du contexte, streamRate : fréquence du micro)
+  function goertzelDb(x, from, N, f, sr) {
+    var k = 2 * Math.cos(2 * Math.PI * f / sr), s1 = 0, s2 = 0, i, s0;
+    for (i = from; i < from + N; i++) { s0 = x[i] + k * s1 - s2; s2 = s1; s1 = s0; }
+    var p = s1 * s1 + s2 * s2 - k * s1 * s2;
+    return 20 * Math.log10(2 * Math.sqrt(Math.max(p, 0)) / N + 1e-12);
+  }
+  function analyseCheck(x, sr, streamRate, tone) {
+    var n = x.length, i, j, pk = 0, F = Math.max(1, Math.round(sr * 0.05)), fr = [], s, a = 0, d2 = 0, x2 = 0, tb = [], B = Math.floor(sr);
+    for (i = 0; i < n; i++) { if (Math.abs(x[i]) > pk) pk = Math.abs(x[i]); }
+    for (i = 0; i + F <= n; i += F) { s = 0; for (j = i; j < i + F; j++) s += x[j] * x[j]; fr.push(10 * Math.log10(s / F + 1e-20)); }
+    var so = fr.slice().sort(function (p, q) { return p - q; });
+    var voiceDb = so.length ? so[Math.floor(so.length * 0.9)] : -Infinity;
+    var crestDb = so.length ? so[so.length - 1] : -Infinity;
+    var peakDb = 20 * Math.log10(pk + 1e-12);
+    // Instru captée : tonalité stable (1 kHz) mesurée par blocs d'1 s ; la médiane ignore la voix
+    for (i = 0; i + B <= n; i += B) tb.push(goertzelDb(x, i, B, tone, sr));
+    tb.sort(function (p, q) { return p - q; });
+    var toneDb = tb.length ? tb[Math.floor(tb.length / 2)] : -Infinity;
+    // Énergie au-dessus de ~4 kHz (dérivée seconde, relative au signal)
+    for (i = 2; i < n; i++) { var dd = x[i] - 2 * x[i - 1] + x[i - 2]; d2 += dd * dd; x2 += x[i] * x[i]; }
+    var hfDb = 10 * Math.log10((d2 + 1e-20) / (x2 + 1e-20));
+    var rate = streamRate || sr;
+    return { peakDb: peakDb, voiceDb: voiceDb, crestDb: crestDb, toneDb: toneDb, hfDb: hfDb, rate: rate, phone: rate <= 16000 || (voiceDb > -55 && hfDb < -24) };
+  }
+  function runVoiceCheck(c) {
+    var sr = c.sampleRate, dur = 5, tone = 1000, lvl = dbToGain(-36);
+    var tr = rx.stream.getAudioTracks()[0], set = tr && tr.getSettings ? tr.getSettings() : {};
+    var node = new AudioWorkletNode(c, 'sf-cap', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+    var chunks = [], n = 0;
+    return new Promise(function (resolve) {
+      node.port.onmessage = function (e) {
+        if (e.data.type === 'data') { chunks.push(e.data.data); n += e.data.data.length; }
+        else if (e.data.type === 'end') {
+          var x = new Float32Array(n), o = 0, k;
+          for (k = 0; k < chunks.length; k++) { x.set(chunks[k], o); o += chunks[k].length; }
+          try { node.disconnect(); } catch (err) { /* déjà déconnecté */ }
+          resolve(analyseCheck(x, sr, set.sampleRate ? Math.round(set.sampleRate) : 0, tone));
+        }
+      };
+      rx.ig.connect(node); node.connect(rx.zero);
+      var t0 = c.currentTime + 0.15, o = c.createOscillator(), g = c.createGain();
+      g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(lvl, t0 + 0.3);
+      g.gain.setValueAtTime(lvl, t0 + dur - 0.3); g.gain.linearRampToValueAtTime(0, t0 + dur);
+      o.frequency.value = tone; o.connect(g); g.connect(c.destination);
+      o.start(t0); o.stop(t0 + dur + 0.05);
+      node.port.postMessage({ type: 'start', at: t0 });
+      setTimeout(function () { node.port.postMessage({ type: 'stop' }); }, (dur + 0.4) * 1000);
+    });
+  }
+  // « Vérifier ma voix » : 5 s de test, instru de remplacement (tonalité douce à 1 kHz), verdict et gain d'entrée
+  function voiceCheck() {
+    if (VC.busy) return;
+    if (st.recording || st.recPending || rx.ending) { setStatus('Vérification impossible pendant un enregistrement.', true); return; }
+    if (micUnavailable()) { showMicError(null); return; }
+    var c = getCtx();
+    if (!window.AudioWorkletNode || !c.audioWorklet) { setStatus('Vérification de la voix indisponible sur ce navigateur (AudioWorklet absent).', true); return; }
+    var tok = ++VC.tok;
+    VC.busy = true; VC.msg = 'Ouverture du micro…'; updateDiags();
+    if (c.state !== 'running') c.resume().catch(noop);
+    openMic().then(function () { return ensureCapture(c); }).then(function () {
+      if (!rx.node) throw new Error('capture indisponible');
+      VC.msg = 'Test en cours : chante ou parle normalement pendant 5 s…'; updateDiags();
+      return runVoiceCheck(c);
+    }).then(function (r) {
+      if (tok !== VC.tok) return;
+      VC.busy = false;
+      VC.res = judge(r);
+      VC.res.key = micDevNow();
+      applyCheckGain(c, VC.res);
+      if (VC.res.captured && !st.mic.voice) { st.mic.voice = true; VC.res.lines.push('Anti-écho activé.'); micSettingsChanged(); }
+      updateDiags(); updateSheet();
+    }).catch(function (err) {
+      VC.busy = false;
+      showMicError(err);
+      updateDiags();
+    });
+  }
+  function judge(r) {
+    var lines = ['Crête ' + fr1(r.peakDb, 1) + ' dBFS · voix ' + fr1(r.voiceDb, 0) + ' dBFS · fréquence du micro ' + Math.round(r.rate) + ' Hz.'];
+    var captured = r.toneDb > -75, v;
+    if (r.voiceDb <= -55) v = { lvl: 'warn', title: 'Aucune voix détectée', text: 'Pendant le test, chante ou parle près du micro, puis relance.' };
+    else if (captured) v = { lvl: 'warn', title: 'Instru captée', text: 'Le micro entend la sortie des haut-parleurs. Mets un casque, ou garde Anti-écho et Retirer l’instru captée.' };
+    else if (r.phone) v = { lvl: 'red', title: 'Mode appel détecté', text: 'Qualité téléphone (16 kHz ou moins) : le micro travaille en mode appel. Choisis le micro du PC (ou un micro USB) en entrée.' };
+    else if (r.peakDb > -1) v = { lvl: 'warn', title: 'Trop fort', text: 'Éloigne le micro (15–20 cm) : la voix sature.' };
+    else if (r.voiceDb < -30) v = { lvl: 'warn', title: 'Voix trop faible', text: 'Rapproche le micro à 15–20 cm.' };
+    else v = { lvl: 'ok', title: 'Parfait', text: 'Voix bien réglée.' };
+    return { verdict: v, lines: lines, phone: r.phone, captured: captured, peakDb: r.peakDb, key: null, stats: r };
+  }
+  // Gain d'entrée numérique : vise des crêtes vers −6 dBFS, entre 0 et +24 dB (ne touche pas au micro lui-même)
+  function applyCheckGain(c, res) {
+    var s = res.stats;
+    if (!isFinite(s.peakDb) || s.voiceDb <= -55) return;
+    var g = clamp(st.mic.inGain + (-6 - s.peakDb), 0, 24);
+    st.mic.inGain = Math.round(g * 2) / 2; saveInGain();
+    if (rx.ig) rx.ig.gain.setTargetAtTime(dbToGain(st.mic.inGain), c.currentTime, 0.02);
+    res.lines.push('Gain d’entrée : +' + fr1(st.mic.inGain, 1) + ' dB.');
+  }
+  // Chaîne « Voix pro » : présente sur la piste Voix (slot 0), les préréglages occupent les autres slots
+  function hasPro(t) { return !!t && t.inserts.some(function (i) { return i && i.type === 'pro'; }); }
+  function ensureVoicePro(t) {
+    if (!t || hasPro(t)) return;
+    var rest = t.inserts.filter(function (i) { return i && i.type !== 'pro'; }).slice(0, 3);
+    t.inserts = [{ type: 'pro', params: cloneP(INSERT_DEFAULTS.pro) }].concat(rest).concat([null, null, null]).slice(0, 4);
+  }
+  function removeVoicePro(t) {
+    if (!t) return;
+    t.inserts = t.inserts.map(function (i) { return i && i.type === 'pro' ? null : i; });
+  }
+  function setVoicePro(on) {
+    var v = voiceTrack();
+    saveVPro(on);
+    if (v) { if (on) ensureVoicePro(v); else removeVoicePro(v); }
+    if (v && on) updateVoicePro(v, 'Voix pro activée');
+    else edited(on ? 'Voix pro activée' : 'Voix pro désactivée');
+  }
+  // Seuil (crête RMS − 18 dB, sur 50 ms) et normalisation (−16 LUFS, BS.1770) de la piste Voix
+  function updateVoicePro(t, label) {
+    var ins = t && t.inserts.filter(function (i) { return i && i.type === 'pro'; })[0];
+    if (!ins) { edited(label || null); return; }
+    var tok = ++VP.tok, F, crest = -Infinity, end = projectEnd();
+    clipsOf(t.id).forEach(function (cl) {
+      var d = cl.buffer.getChannelData(0), n = d.length, i, j, s;
+      F = Math.max(1, Math.round(cl.buffer.sampleRate * 0.05));
+      for (i = 0; i + F <= n; i += F) { s = 0; for (j = i; j < i + F; j++) s += d[j] * d[j]; crest = Math.max(crest, 10 * Math.log10(s / F + 1e-20)); }
+    });
+    ins.params.thr = isFinite(crest) ? clamp(Math.round((crest - 18) * 2) / 2, -60, -6) : -28;
+    ins.params.gain = 0;
+    if (!clipsOf(t.id).length || end <= 0) { edited(label || null); return; }
+    measureTrack(t, end, 44100).then(function (z) {
+      if (tok !== VP.tok) return;
+      var lu = gateStats(z).lufs;
+      ins.params.gain = isFinite(lu) ? clamp(Math.round((-16 - lu) * 2) / 2, -12, 18) : 0;
+      edited(label || null);
+    }).catch(noop);
+  }
+
   // ---------- Sortie audio (casque Bluetooth, haut-parleurs) : AudioContext.setSinkId ----------
   function isIOSDev() {
     var ua = navigator.userAgent || '';
@@ -6420,6 +6701,7 @@ select.ie-in{width:auto}
       u.unsup.hidden = sup;
       u.warn.hidden = !same;
     });
+    updateDiags();
   }
   // Section « Sortie audio » : menu, test, avertissements (absente sur iPhone / iPad)
   function buildOutBody() {
@@ -6473,8 +6755,8 @@ select.ie-in{width:auto}
   // Branche / débranche le micro sur le nœud de capture (le nœud reste relié à la destination)
   function attachCapture(on) {
     var n = rx.node || rx.sp;
-    if (!n || !rx.src) return;
-    try { if (on) rx.src.connect(n); else rx.src.disconnect(n); } catch (e) { /* lien déjà présent ou absent */ }
+    if (!n || !rx.ig) return;
+    try { if (on) rx.ig.connect(n); else rx.ig.disconnect(n); } catch (e) { /* lien déjà présent ou absent */ }
   }
   function onCapMsg(e) {
     var d = e.data;
@@ -6540,6 +6822,7 @@ select.ie-in{width:auto}
     var P = st.playing ? currentPos() : st.playhead;
     var t = armed ? trackById(armed) : null, created = false;
     if (!t) { t = addTrack('Voix'); st.armedId = t.id; created = true; }
+    if (t.name === 'Voix' && vproOn()) ensureVoicePro(t);
     var mode = st.recMode, cd = mode ? 0 : st.mic.countIn, b = beatLen(), C0 = c.currentTime + 0.05 + cd * b;
     st.recMode = null;
     if (rx.nodeMode === 'mr' && !startMR()) {
@@ -6956,6 +7239,7 @@ select.ie-in{width:auto}
     s.pro.setAttribute('aria-pressed', st.pro ? 'true' : 'false');
     syncMicNote();
     syncOutUI();
+    updateDiags();
   }
 
   // Niveau d'entrée (vumètre) : pic et RMS du flux micro, mis à jour à chaque image
@@ -8243,6 +8527,12 @@ select.ie-in{width:auto}
     '.as-master{width:124px;background:linear-gradient(180deg,rgba(168,85,247,.28),rgba(34,211,238,.08) 45%,rgba(28,24,44,.95));border-color:rgba(168,85,247,.55);box-shadow:0 0 22px rgba(168,85,247,.25),var(--shadow,0 8px 30px rgba(0,0,0,.45));}',
     '.as-master::before{height:4px;}',
     '.as-inserts{display:flex;flex-direction:column;gap:4px;min-height:4px;}',
+    '.as-diag{border:1px solid var(--border2);border-left:4px solid var(--border2);border-radius:var(--radius-sm);padding:10px 12px;margin:8px 0;background:var(--bg2);display:flex;flex-direction:column;gap:6px;}',
+    '.as-diag-red{border-left-color:var(--hot);}.as-diag-orange{border-left-color:var(--warn);}.as-diag-green{border-left-color:var(--ok);}',
+    '.as-diag-t{font-weight:600;font-size:13px;}.as-diag-red .as-diag-t{color:var(--hot);}.as-diag-orange .as-diag-t{color:var(--warn);}.as-diag-green .as-diag-t{color:var(--ok);}',
+    '.as-diag-x,.as-diag-real{font-size:12px;color:var(--muted);line-height:1.4;}.as-diag-real{font-family:var(--mono);font-size:11px;}',
+    '.as-vres{font-size:12px;line-height:1.4;padding:8px 10px;border-radius:var(--radius-sm);background:var(--panel2);color:var(--text);}',
+    '.as-vres-red{color:var(--hot);}.as-vres-warn{color:var(--warn);}.as-vres-ok{color:var(--ok);}',
     '.as-inserts-empty{height:4px;}',
     '.as-ins{display:flex;gap:4px;}',
     '.as-ins-sel{flex:1;min-width:0;height:26px;border-radius:8px;font-size:11px;padding:0 6px;}',
@@ -8804,6 +9094,7 @@ select.ie-in{width:auto}
     s.devNote = el('div', 'as-note');
     s.devNote.hidden = true;
     secIn.appendChild(s.devNote);
+    s.diag = buildDiag(secIn);
     secIn.appendChild(el('div', 'as-note', 'Sur iPhone, iOS peut imposer l’entrée selon le casque connecté.'));
     var vrow = el('div', 'as-row');
     s.voice = chip('Traitement voix (anti-écho)', 'Annulation d’écho, suppression de bruit et contrôle de gain. Désactivé par défaut : signal brut.', st.mic.voice, 'as-wide', function () {
@@ -10101,6 +10392,7 @@ select.ie-in{width:auto}
       outSec.appendChild(buildOutBody());
       body.appendChild(outSec);
     }
+    buildDiag(body);
     u.btNote = el('div', 'as-note-b', 'Le micro du casque Bluetooth enregistre en qualité réduite ; si possible, chante dans le micro de l’iPhone.');
     u.noneNote = el('div', 'as-note-b', 'Sans casque, l’instru sort des haut-parleurs et sera captée par le micro : elle se retrouvera dans ta prise. Le retour micro est coupé.');
     u.btmixNote = el('div', 'as-note-b', 'L’instru sort dans ton casque Bluetooth, et ta voix est captée par le micro de l’iPhone. Safari ne garantit pas cette combinaison : lance le test pour vérifier.');
@@ -10163,6 +10455,9 @@ select.ie-in{width:auto}
       closeOv(u.shTake); openSync(syncSrcTake(tk));
     });
     adv.appendChild(u.tkAdv); body.appendChild(adv);
+    u.tkPro = swRow(body, 'Voix pro', 'Chaîne automatique : filtre, de-esser, compression, présence, normalisation à −16 LUFS et limiteur. Non destructif, appliquée aussi à l’export.', function () {
+      setVoicePro(!vproOn());
+    });
     u.tkDen = swRow(body, 'Réduire le bruit', 'Coupe le souffle entre les syllabes. Non destructif : la prise d’origine est gardée.', function () {
       var tk = takeById(st.booth.tkId);
       if (!tk || st.booth.fxBusy || st.recording) return;
@@ -10170,7 +10465,7 @@ select.ie-in{width:auto}
       setTakeFx(tk, { den: !fx.den, sync: fx.sync, tune: fx.tune }, fx.den ? 'Réduction du bruit désactivée' : 'Réduction du bruit');
     });
     // Sans casque : l'instru captée par le micro peut être retirée (non destructif, filtre adaptatif)
-    u.tkRi = swRow(body, 'Retirer l’instru captée', 'Sans casque, le micro a capté le beat : il est soustrait de la prise. Non destructif.', function () {
+    u.tkRi = swRow(body, 'Retirer l’instru captée', 'Si le micro a capté le beat (sans casque ou haut-parleurs), il est soustrait de la prise. Non destructif.', function () {
       var tk = takeById(st.booth.tkId);
       if (!tk || st.booth.fxBusy || st.recording) return;
       var fx = takeFx(tk);
@@ -10456,7 +10751,8 @@ select.ie-in{width:auto}
     u.tkTitle.textContent = 'Prise ' + tk.num + ' · ' + fmtDur(tk.buffer.duration);
     if (u.tkFor !== tk.buffer) { u.tkFor = tk.buffer; drawMini(u.tkWave, tk.buffer); }
     setSw(u.tkSync, fx.sync); setSw(u.tkDen, fx.den); setSw(u.tkTune, !!fx.tune);
-    setSw(u.tkRi, fx.ri); u.tkRi.hidden = !(tk.instru && (st.booth.hp === 'none' || fx.ri)); u.tkRi.disabled = busy;
+    setSw(u.tkPro, vproOn());
+    setSw(u.tkRi, fx.ri); u.tkRi.hidden = !(tk.instru && (st.booth.hp === 'none' || outIsSpeakers() || fx.ri)); u.tkRi.disabled = busy;
     u.tkSync.disabled = busy; u.tkDen.disabled = busy; u.tkTune.disabled = busy || st.recording;
     u.tkHarmGo.disabled = busy || st.recording;
     HARM_KINDS.forEach(function (k) { var on = st.booth.harm.indexOf(k) >= 0; u.tkHarm[k].classList.toggle('on', on); u.tkHarm[k].setAttribute('aria-pressed', on ? 'true' : 'false'); });
@@ -10690,6 +10986,7 @@ select.ie-in{width:auto}
     if (st.booth.autoSync && !fx0.sync) { want.sync = true; auto.push('Sur le temps'); }
     if (fresh && st.booth.tune.on && !fx0.tune) { want.tune = tuneSet(); auto.push('Autotune'); }
     if (auto.length) setTakeFx(tk, want, auto.join(' + ') + ' (automatique)');
+    if (fresh && vproOn() && voiceTrack() && hasPro(voiceTrack())) updateVoicePro(voiceTrack());
     renderBooth();
   }
   function closeTakeSheet() { closeOv(st.ui.shTake); renderBooth(); }
@@ -11069,13 +11366,17 @@ select.ie-in{width:auto}
     var P = null, i;
     for (i = 0; i < VPRESETS.length; i++) if (VPRESETS[i][0] === name) P = VPRESETS[i];
     var list = P ? P[3] : [];
-    v.inserts = [0, 1, 2, 3].map(function (k) { var p = list[k]; return p ? { type: p.type, params: cloneP(p.params) } : null; });
+    var arr = list.map(function (p) { return { type: p.type, params: cloneP(p.params) }; });
+    if (vproOn()) arr = [{ type: 'pro', params: cloneP(INSERT_DEFAULTS.pro) }].concat(arr.slice(0, 3));
+    else arr = arr.slice(0, 4);
+    v.inserts = [0, 1, 2, 3].map(function (k) { return arr[k] || null; });
     if (name === 'dbl') v.pan = -12;
     else if (v.preset === 'dbl') v.pan = 0;
     v.preset = P ? P[0] : 'naturel';
     st.insSel = null;
     if (P && P[4]) { st.booth.tune.on = true; st.booth.tune.force = P[4].force; st.booth.tune.speed = P[4].speed; markDirty(); }
     edited('Effet voix : ' + (P ? P[1] : 'Naturel') + (P && P[4] ? ' (autotune pour les prochaines prises)' : ''));
+    if (vproOn()) updateVoicePro(v);
   }
 
   // ---------- Studio : nom, Enregistrement (garde-fous) ----------
@@ -12229,6 +12530,7 @@ select.ie-in{width:auto}
     st.pending.splice(0).forEach(function (p) { addTrackWithClip(p[0], p[1]); });
     st.last = snapshot(); st.lastSer = serial(st.last);
     st.mic.latency = loadLatency();
+    st.mic.inGain = loadInGain();
     st.booth.hp = loadHP();
     var pOut = loadPick(OUT_KEY), pMic = loadPick(MIC_KEY);
     if (pOut) st.sink = pOut;
@@ -13264,6 +13566,13 @@ select.ie-in{width:auto}
       renderAll();
       return st.booth.lastId;
     },
+    // Accès de test : rendu hors ligne du seul insert « Voix pro » (params : { thr, gain }) sur un buffer
+    _voicePro: function (buf, params) {
+      var c = new OfflineAudioContext(buf.numberOfChannels, buf.length, buf.sampleRate);
+      var src = c.createBufferSource(), node = makeInsert(c, { type: 'pro', params: params || cloneP(INSERT_DEFAULTS.pro) });
+      src.buffer = buf; src.connect(node.input); node.output.connect(c.destination); src.start(0);
+      return c.startRendering();
+    },
     // Accès de test à l'analyse de tonalité et au moteur (fonctions autonomes)
     _engine: function () { return syncEngObj(); },
     // Accès de test : sonie, vrai crête, mastering, équilibrage, retrait d'instru, préréglages
@@ -13369,6 +13678,8 @@ select.ie-in{width:auto}
         lyrTimes: st.lyr.times.slice(),
         frameOn: st.frameOn,
         headset: st.booth.hp,
+        voicePro: (function () { var v = voiceTrack(), i = v ? v.inserts.filter(function (x) { return x && x.type === 'pro'; })[0] : null; return i ? { thr: i.params.thr, gain: i.params.gain } : null; })(),
+        inGain: st.mic.inGain,
         takes: st.takes.map(function (k) { return { id: k.id, trackId: k.trackId, num: k.num, dur: k.buffer.duration, active: isActive(k), fx: k.fx || null, nudge: k.nudge || 0 }; }),
         key: st.key, layer: st.booth.layer, tune: st.booth.tune, harm: st.booth.harm, fxBusy: st.booth.fxBusy, keyBusy: st.booth.keyBusy,
         worker: SY_W ? 'ok' : (SY_WBAD ? 'bad' : 'none'),

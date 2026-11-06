@@ -1,7 +1,7 @@
 /* Studio Fusion — service worker (hors ligne).
    VERSION est remplacée par build.py (hash du bundle) : tout changement de l'appli change le fichier,
    donc le navigateur installe la nouvelle version et prévient la page (bandeau « Mettre à jour »). */
-const VERSION = '6a721497a0';
+const VERSION = 'e05545862f';
 const CACHE = 'studio-fusion-v' + VERSION;          // cache de l'appli (purgé à chaque version)
 const FONT_CACHE = 'studio-fusion-fonts';           // polices Google, conservées entre versions
 const BASE = new URL('./', self.location.href).href; // dossier du site (portée)
