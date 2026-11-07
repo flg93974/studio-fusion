@@ -4670,6 +4670,9 @@ select.ie-in{width:auto}
  * habillage « Studio nocturne » (DESIGN.md) et mise en page mobile (≤ 820 px).
  * Partie 2 (iPhone) : casque Bluetooth + micro intégré, stratégies de routage audio (A, B, C, D),
  * test d'écoute guidé, mémorisation de la stratégie qui marche.
+ * Partie 3 : prises incassables (blocs écrits chaque seconde : OPFS ou IndexedDB, récupération au démarrage),
+ * interruptions (appel, verrouillage, contexte ou micro perdu) avec reprise, contrôle de chaque prise (format,
+ * trous, dérive, saturation, bruit de fond, canal), calibrage automatique de la latence (boucle acoustique MLS).
  */
 (function () {
   'use strict';
@@ -4795,7 +4798,12 @@ select.ie-in{width:auto}
     devs: [], labels: false,            // entrées audio connues (libellés après une autorisation)
     micName: '', micState: '', openRoute: '', // micro réellement ouvert : libellé, '' / 'ok' / 'warn'
     el: null, media: null, wantMedia: false, // lecteur média (stratégie D) et son WAV rendu
-    guide: null                          // test d'écoute guidé en cours
+    guide: null,                         // test d'écoute guidé en cours
+    // Prises incassables et contrôle : canal droit, trous, instants réels, prise en cours de sauvegarde
+    chR: [], gaps: [], t0: null, tEnd: null, eL: 0, eR: 0, stereo: false, flushT: null, rec: null,
+    interrupted: null, offer: null, recList: [], recPend: null, recBusy: false, recLoading: null, micSet: null,
+    // Calibrage automatique de la latence
+    acal: null, acalBusy: false, acalReady: false, acalMsg: '', acalErr: false
   };
   st.markers = []; st.markerSeq = 0; st.selSet = []; st.clipboard = null;
   st.amix = amixFrom(null); st.syncPref = syncPrefFrom(null);
@@ -4871,7 +4879,11 @@ select.ie-in{width:auto}
     if (!st.ctx) {
       var AC = window.AudioContext || window.webkitAudioContext;
       st.ctx = new AC();
-      st.ctx.onstatechange = function () { renderTransport(); };
+      st.ctx.onstatechange = function () {
+        renderTransport();
+        // Safari passe en « interrupted » (appel, autre application) : la prise en cours est finalisée
+        if (st.ctx && st.recording && (st.ctx.state === 'suspended' || st.ctx.state === 'interrupted')) recInterrupt('audio interrompu (' + st.ctx.state + ')');
+      };
       if (st.sink.id) applySink(); // sortie mémorisée (casque) : appliquée à la création du contexte
     }
     return st.ctx;
@@ -6139,27 +6151,38 @@ select.ie-in{width:auto}
   // ---------- Enregistrement : micro PCM, latence, calibrage, retour ----------
   // Chaîne : micro -> AudioWorklet (PCM brut) -> gain nul -> destination, dans l'AudioContext unique
   // qui joue aussi l'instrumentale. Repli : ScriptProcessor, puis MediaRecorder (dernier recours).
+  // Chaque bloc porte son instant réel (t) ; un trou (blocs non délivrés) est signalé par « gap » (n échantillons manquants)
   var WORKLET_SRC = [
     'class SFCap extends AudioWorkletProcessor {',
     '  constructor() {',
     '    super();',
-    '    this.on = false; this.at = 0;',
+    '    this.on = false; this.at = 0; this.next = -1;',
     '    this.port.onmessage = (e) => {',
     '      const d = e.data;',
-    '      if (d.type === "start") { this.on = true; this.at = d.at; }',
-    '      else if (d.type === "stop") { this.on = false; this.port.postMessage({ type: "end" }); }',
+    '      if (d.type === "start") { this.on = true; this.at = d.at; this.next = -1; }',
+    '      else if (d.type === "stop") { this.on = false; this.port.postMessage({ type: "end", t: currentTime }); }',
     '    };',
     '  }',
     '  process(inputs) {',
-    '    const ch = inputs[0] && inputs[0][0];',
-    '    if (!this.on || !ch) return true;',
-    '    const n = ch.length, t0 = currentTime;',
+    '    const inp = inputs[0] || [], ch = inp[0];',
+    '    if (!ch || !this.on) return true;',
+    '    const n = ch.length, t0 = currentTime, end = t0 + n / sampleRate;',
+    '    if (end <= this.at) return true;',
+    '    if (this.next < 0) this.next = this.at;',
     '    let from = 0;',
     '    if (t0 < this.at) from = Math.min(n, Math.ceil((this.at - t0) * sampleRate));',
+    '    const t1 = t0 + from / sampleRate;',
+    '    // Trou : le premier échantillon utile arrive plus d\'un bloc après l\'attendu',
+    '    const lag = Math.round((t1 - this.next) * sampleRate);',
+    '    if (lag >= 128) this.port.postMessage({ type: "gap", n: Math.round(lag / 128) * 128 });',
+    '    this.next = end;',
     '    if (from >= n) return true;',
     '    const out = new Float32Array(n - from);',
     '    out.set(ch.subarray(from));',
-    '    this.port.postMessage({ type: "data", data: out }, [out.buffer]);',
+    '    const r = inp.length > 1 ? new Float32Array(n - from) : null;',
+    '    if (r) r.set(inp[1].subarray(from));',
+    '    const msg = { type: "data", data: out, r: r, t: t1 };',
+    '    this.port.postMessage(msg, r ? [out.buffer, r.buffer] : [out.buffer]);',
     '    return true;',
     '  }',
     '}',
@@ -6282,6 +6305,13 @@ select.ie-in{width:auto}
       rx.micState = dev ? (set.deviceId === dev ? 'ok' : 'warn') : (autoKind() ? 'warn' : '');
       if (tr && tr.label) rx.labels = true; // libellés disponibles : pas de premier essai nécessaire
       rx.stream = stream; rx.key = key; st.booth.micErr = false;
+      // Réglages réellement appliqués par le navigateur (contrôle de chaque prise)
+      rx.micSet = { sr: set.sampleRate ? Math.round(set.sampleRate) : 0, ch: set.channelCount || 1, ec: set.echoCancellation === true, ns: set.noiseSuppression === true, agc: set.autoGainControl === true };
+      if (tr && tr.addEventListener) {
+        tr.addEventListener('ended', function () { if (rx.stream === stream) recInterrupt('micro déconnecté'); });
+        tr.addEventListener('mute', function () { if (rx.stream === stream) recInterrupt('micro coupé par le système'); });
+      }
+      applyPairLatency();
       rx.src = c.createMediaStreamSource(stream);
       // Gain d'entrée numérique (test « Vérifier ma voix ») : avant le vumètre, le retour et la capture
       rx.ig = c.createGain(); rx.ig.gain.value = dbToGain(st.mic.inGain || 0);
@@ -6432,6 +6462,7 @@ select.ie-in{width:auto}
     d.box.appendChild(d.vBtn);
     d.vRes = el('div', 'as-vres'); d.vRes.hidden = true;
     d.box.appendChild(d.vRes);
+    d.acal = buildAutoUI(d.box);
     (st.ui.diags = st.ui.diags || []).push(d);
     parent.appendChild(d.box);
     return d;
@@ -6456,6 +6487,7 @@ select.ie-in{width:auto}
       else if (r) { d.vRes.hidden = false; d.vRes.className = 'as-vres as-vres-' + r.verdict.lvl; d.vRes.textContent = r.verdict.title + ' — ' + r.verdict.text + (r.lines.length ? ' ' + r.lines.join(' ') : ''); }
       else d.vRes.hidden = true;
     });
+    renderAutoUI();
   }
   // Analyse d'un enregistrement de test (x : mono, sr : fréquence du contexte, streamRate : fréquence du micro)
   function goertzelDb(x, from, N, f, sr) {
@@ -6679,6 +6711,7 @@ select.ie-in{width:auto}
     st.sink = { id: id || '', label: d ? (d.label || '') : '' };
     savePick(OUT_KEY, st.sink.id, st.sink.label);
     applySink();
+    applyPairLatency();
     setStatus(st.sink.id ? 'Sortie : ' + (st.sink.label || 'appareil choisi') + '.' : 'Sortie : par défaut du système.');
     syncOutUI();
   }
@@ -6776,11 +6809,6 @@ select.ie-in{width:auto}
     if (!n || !rx.ig) return;
     try { if (on) rx.ig.connect(n); else rx.ig.disconnect(n); } catch (e) { /* lien déjà présent ou absent */ }
   }
-  function onCapMsg(e) {
-    var d = e.data;
-    if (d.type === 'data') onCapData(d.data);
-    else if (d.type === 'end') finishPCM();
-  }
   function onCapData(f) {
     rx.chunks.push(f);
     rx.nSamp += f.length;
@@ -6852,13 +6880,15 @@ select.ie-in{width:auto}
     st.recording = true;
     st.recMute = t.id;
     st.playhead = P;
-    rx.take = { tid: t.id, pos: P, sr: c.sampleRate, lat: st.mic.latency, created: created, startAt: C0, cd: cd, srcs: 0, instru: false };
+    rx.take = { tid: t.id, pos: P, sr: c.sampleRate, lat: st.mic.latency, created: created, startAt: C0, cd: cd, srcs: 0, instru: false, mic: rx.micSet ? Object.assign({}, rx.micSet) : null };
     if (mode && mode.kind === 'punch') rx.take.punch = { a: mode.a, b: mode.b, post: 1 };
     if (mode && mode.kind === 'loop') {
       rx.take.loopRec = { a: mode.a, b: mode.b }; rx.take.cuts = [];
       rx.take.restoreLoop = !st.loop; st.loop = true;
     }
     rx.chunks = []; rx.nSamp = 0; rx.pk = []; rx.at = C0; rx.on = true; rx.hotUntil = 0;
+    rx.chR = []; rx.gaps = []; rx.t0 = null; rx.tEnd = null; rx.eL = 0; rx.eR = 0; rx.stereo = false; rx.interrupted = null;
+    if (rx.nodeMode === 'pcm') recBegin(rx.take);
     if (rx.node) rx.node.port.postMessage({ type: 'start', at: C0 });
     attachCapture(true);
     startPlayback(C0);
@@ -6982,8 +7012,11 @@ select.ie-in{width:auto}
   // Arrêt : capture arrêtée, lecture arrêtée, la tête de lecture reste à la fin de la prise
   function stopRecording() {
     if (!st.recording) return;
-    var pos = currentPos();
+    var pos = currentPos(), tkStop = rx.take;
     st.recording = false; st.recMute = null; rx.on = false;
+    if (rx.take && rx.interrupted) rx.take.interrupted = rx.interrupted;
+    rx.interrupted = null;
+    clearInterval(rx.flushT); rx.flushT = null;
     wakeOff();
     attachCapture(false);
     stopGraph(); st.playing = false; st.playhead = pos; stopTimerIfIdle();
@@ -6992,6 +7025,8 @@ select.ie-in{width:auto}
     } else if (rx.nodeMode === 'pcm' && rx.node) {
       rx.ending = true;
       rx.node.port.postMessage({ type: 'stop' });
+      // Secours si le worklet ne répond plus (page cachée, contexte suspendu) : la prise est tout de même rangée
+      setTimeout(function () { if (rx.ending && rx.take === tkStop) finishPCM(); }, 1200);
     } else {
       finishPCM();
     }
@@ -7000,11 +7035,33 @@ select.ie-in{width:auto}
   }
   function finishPCM() {
     rx.ending = false;
-    var take = rx.take, chunks = rx.chunks, n = rx.nSamp, all = new Float32Array(n), o = 0, i;
-    rx.take = null; rx.chunks = []; rx.nSamp = 0; rx.pk = [];
+    clearInterval(rx.flushT); rx.flushT = null;
+    var take = rx.take, chunks = rx.chunks, chR = rx.chR, i, o = 0, src, all, n, sr;
+    var info = { t0: rx.t0, tEnd: rx.tEnd, gaps: rx.gaps || [], stereo: rx.stereo, eL: rx.eL, eR: rx.eR, mic: take ? take.mic : null, driftMs: null, leftOnly: false, rightOnly: false };
+    rx.take = null; rx.chunks = []; rx.chR = []; rx.nSamp = 0; rx.pk = []; rx.gaps = []; rx.t0 = null; rx.tEnd = null;
+    rx.eL = 0; rx.eR = 0; rx.stereo = false; rx.rec = null;
     if (!take) return;
-    for (i = 0; i < chunks.length; i++) { all.set(chunks[i], o); o += chunks[i].length; }
-    var sr = take.sr, lat = Math.round((take.lat || 0) * sr / 1000);
+    // Canal : stéréo dont un seul canal porte le signal (bug WebKit 281978) -> ce canal pour les deux
+    if (info.stereo && chR.length) {
+      var pick = chanPick(info.eL, info.eR);
+      if (pick === 'left') info.leftOnly = true;
+      else if (pick === 'right') { info.rightOnly = true; src = chR; }
+    }
+    src = src || chunks;
+    n = 0; for (i = 0; i < src.length; i++) n += src[i].length;
+    all = new Float32Array(n);
+    for (i = 0; i < src.length; i++) { all.set(src[i], o); o += src[i].length; }
+    sr = take.sr;
+    // Trous : silence inséré (la chronologie reste juste) ; dérive : rééchantillonnage si l'écart dépasse 5 ms
+    all = insertGaps(all, info.gaps, sr);
+    if (info.t0 != null && info.tEnd != null) {
+      var want = Math.round((info.tEnd - info.t0) * sr);
+      info.driftMs = (want - all.length) / sr * 1000;
+      if (Math.abs(info.driftMs) > 5 && want > 0) all = resampleTo(all, want);
+    }
+    take.check = takeCheck(all, sr, info);
+    n = all.length;
+    var lat = Math.round((take.lat || 0) * sr / 1000);
     if (take.restoreLoop) st.loop = false;
     if (take.punch) {
       // Punch : on ne garde que la zone [a, b] ; le pré-roll et le post-roll ne sont pas conservés
@@ -7040,6 +7097,7 @@ select.ie-in{width:auto}
     var t = trackById(take.tid);
     if (n < sr * 0.05) {
       if (take.created && t) dropTrack(t.id);
+      if (take.rid) recRemove('rec-' + take.rid).catch(noop);
       renderAll();
       setStatus('Prise trop courte : rien n’a été ajouté.', true);
       return;
@@ -7060,19 +7118,23 @@ select.ie-in{width:auto}
     }
     take.boostDb = boostDb;
     st.takeSeq += 1;
-    var name = 'Prise ' + st.takeSeq;
+    var name = 'Prise ' + st.takeSeq + (take.recovered ? ' (récupérée)' : (take.interrupted ? ' (interrompue)' : ''));
     // Chaque prise est conservée ; sur la même zone, la précédente passe en réserve (non jouée)
     var tk = { id: uid('k'), trackId: t.id, num: st.takeSeq, name: name, buffer: buf, at: Date.now(), lat: take.lat || 0,
-      base: take.pos, start: take.pos, offset: 0, duration: buf.duration, fadeIn: 0, fadeOut: 0, gainDb: 0, curve: st.curve, nudge: 0, instru: !!take.instru };
+      base: take.pos, start: take.pos, offset: 0, duration: buf.duration, fadeIn: 0, fadeOut: 0, gainDb: 0, curve: st.curve, nudge: 0, instru: !!take.instru,
+      check: take.check || null, interrupted: take.interrupted || null };
     st.takes.push(tk);
     var clip = useTake(tk);
     st.booth.lastId = tk.id;
     rx.lastTake = { clipId: clip.id, label: name, duration: clip.duration, instru: take.instru, srcs: take.srcs, lat: take.lat };
     renderAll();
     if (!opt.noHist) pushHistory(name);
-    saveNow();
-    if (!opt.noHist) setStatus(name + ' ajoutée à « ' + t.name + ' » : ' + clip.duration.toFixed(3) + ' s, latence compensée de ' + take.lat + ' ms' + (take.boostDb > 0.5 ? ', voix trop faible remontée de +' + take.boostDb.toFixed(1) + ' dB' : '') + (pk <= 0.0005 ? ' — attention : prise quasi silencieuse, vérifie le micro choisi' : '') + '.');
+    // Bloc de secours rangé seulement une fois la prise enregistrée dans le son
+    var rid = take.rid;
+    saveNow().then(function () { if (rid && st.sess.ok) recRemove('rec-' + rid).catch(noop); }, noop);
+    if (!opt.noHist) setStatus(name + ' ajoutée à « ' + t.name + ' » : ' + clip.duration.toFixed(3) + ' s, latence compensée de ' + take.lat + ' ms' + (take.boostDb > 0.5 ? ', voix trop faible remontée de +' + take.boostDb.toFixed(1) + ' dB' : '') + (pk <= 0.0005 ? ' — attention : prise quasi silencieuse, vérifie le micro choisi' : '') + '.' + checkNote(take.check));
     if (!opt.noHist) openTakeSheet(tk, true);
+    if (!opt.noHist && take.interrupted) offerResume(tk, take.interrupted);
     if (!opt.noHist) amixAfterTake();
   }
   function dropTrack(tid) {
@@ -7096,6 +7158,566 @@ select.ie-in{width:auto}
   }
   function toggleRecord() {
     if (st.recording) stopRecording(); else startRecording();
+  }
+
+  // ---------- Prises incassables : blocs écrits pendant l'enregistrement, récupération, reprise ----------
+  // Stockage : OPFS (Worker + createSyncAccessHandle) si disponible, sinon IndexedDB « studio-fusion-rec ».
+  // Une prise = « rec-<id>.json » (méta) + « rec-<id>_<k>.pcm » (blocs d'environ 1 s), supprimés une fois la prise rangée.
+  var REC_DB = 'studio-fusion-rec', REC_FLUSH_MS = 1000;
+  var REC_WORKER_SRC = [
+    'self.onmessage = async function (e) {',
+    '  var m = e.data, out = { id: m.id }, tr = [], names, i;',
+    '  try {',
+    '    var root = await navigator.storage.getDirectory();',
+    '    if (m.op === "write") {',
+    '      var hw = await root.getFileHandle(m.name, { create: true }), a = await hw.createSyncAccessHandle();',
+    '      a.truncate(0); a.write(new Uint8Array(m.buf), { at: 0 }); a.flush(); a.close();',
+    '    } else if (m.op === "read") {',
+    '      var hr = await root.getFileHandle(m.name), f = await hr.getFile();',
+    '      out.val = await f.arrayBuffer(); tr.push(out.val);',
+    '    } else if (m.op === "names") {',
+    '      out.val = [];',
+    '      for await (var k of root.keys()) { if (k.indexOf(m.name) === 0) out.val.push(k); }',
+    '    } else if (m.op === "remove") {',
+    '      names = [];',
+    '      for await (var k2 of root.keys()) { if (k2.indexOf(m.name) === 0) names.push(k2); }',
+    '      for (i = 0; i < names.length; i++) await root.removeEntry(names[i]);',
+    '    }',
+    '  } catch (err) { out.err = String((err && err.message) || err); }',
+    '  self.postMessage(out, tr);',
+    '};'
+  ].join('\n');
+  var recSt = { kind: '', w: null, seq: 0, pend: {}, ready: null };
+  function recPost(op, name, buf) {
+    return new Promise(function (res, rej) {
+      var id = ++recSt.seq;
+      recSt.pend[id] = { res: res, rej: rej };
+      recSt.w.postMessage({ id: id, op: op, name: name, buf: buf || null }, buf ? [buf] : []);
+    });
+  }
+  function recReady() {
+    if (recSt.ready) return recSt.ready;
+    recSt.ready = new Promise(function (resolve) {
+      var ok = false;
+      try { ok = !!(navigator.storage && navigator.storage.getDirectory && window.Worker); } catch (e) { ok = false; }
+      if (!ok) { recSt.kind = 'idb'; resolve(); return; }
+      try { recSt.w = new Worker(URL.createObjectURL(new Blob([REC_WORKER_SRC], { type: 'application/javascript' }))); }
+      catch (e) { recSt.kind = 'idb'; resolve(); return; }
+      recSt.w.onmessage = function (e) {
+        var p = recSt.pend[e.data.id]; if (!p) return; delete recSt.pend[e.data.id];
+        if (e.data.err) p.rej(new Error(e.data.err)); else p.res(e.data.val);
+      };
+      recSt.w.onerror = function () { Object.keys(recSt.pend).forEach(function (k) { recSt.pend[k].rej(new Error('worker')); delete recSt.pend[k]; }); };
+      recSt.kind = 'opfs';
+      // Sonde : le worker doit pouvoir écrire (createSyncAccessHandle) puis effacer un petit fichier
+      recPost('write', 'rec-~probe', new Uint8Array([1, 2, 3, 4]).buffer).then(function () { return recPost('remove', 'rec-~probe'); }).then(function () { resolve(); }, function () {
+        recSt.kind = 'idb';
+        try { recSt.w.terminate(); } catch (e) { /* déjà arrêté */ }
+        resolve();
+      });
+    });
+    return recSt.ready;
+  }
+  function recIdb(op, name, buf) {
+    return new Promise(function (res, rej) {
+      var rq;
+      try { rq = window.indexedDB.open(REC_DB, 1); } catch (e) { rej(e); return; }
+      rq.onupgradeneeded = function () { rq.result.createObjectStore('blobs'); };
+      rq.onerror = function () { rej(rq.error || new Error('stockage indisponible')); };
+      rq.onsuccess = function () {
+        var db = rq.result, mode = (op === 'read' || op === 'names') ? 'readonly' : 'readwrite', tx, s, r = null, range = IDBKeyRange.bound(name, name + '￿');
+        try { tx = db.transaction('blobs', mode); } catch (e) { db.close(); rej(e); return; }
+        s = tx.objectStore('blobs');
+        if (op === 'write') s.put(buf, name);
+        else if (op === 'read') r = s.get(name);
+        else if (op === 'names') r = s.getAllKeys(range);
+        else if (op === 'remove') s.delete(range);
+        tx.oncomplete = function () { db.close(); res(r ? r.result : undefined); };
+        tx.onerror = tx.onabort = function () { db.close(); rej(tx.error || new Error('stockage de prise impossible')); };
+      };
+    });
+  }
+  function recRaw(op, name, buf) {
+    return recReady().then(function () {
+      return recSt.kind === 'opfs' ? recPost(op, name, buf) : recIdb(op, name, buf);
+    });
+  }
+  function recWrite(name, u8) { return recRaw('write', name, u8.slice().buffer); }
+  function recRead(name) { return recRaw('read', name).then(function (v) { return v ? new Uint8Array(v) : null; }); }
+  function recNames(prefix) { return recRaw('names', prefix).then(function (v) { return v || []; }); }
+  function recRemove(prefix) { return recRaw('remove', prefix).then(function () { return true; }); }
+  function recEnc(obj) { return new TextEncoder().encode(JSON.stringify(obj)); }
+  function recK(name) { var mm = /_(\d+)\.pcm$/.exec(name); return mm ? +mm[1] : 0; }
+  // Début d'une prise : méta écrite tout de suite, blocs ensuite toutes les secondes
+  function recBegin(take) {
+    take.rid = 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    rx.rec = { id: take.rid, k: 0, fCh: 0, fail: false };
+    var meta = { id: take.rid, tid: take.tid, pos: take.pos, sr: take.sr, lat: take.lat || 0, instru: !!take.instru, projId: st.projId || null, at: Date.now() };
+    var R = rx.rec;
+    recWrite('rec-' + take.rid + '.json', recEnc(meta)).catch(function () { R.fail = true; });
+    clearInterval(rx.flushT);
+    rx.flushT = setInterval(recFlush, REC_FLUSH_MS);
+  }
+  // Écrit les échantillons captés depuis le dernier bloc (appelé chaque seconde, puis à la fermeture de la page)
+  function recFlush() {
+    var R = rx.rec, i, n = 0, o = 0, all, name;
+    if (!R || !rx.take || rx.chunks.length <= R.fCh) return;
+    for (i = R.fCh; i < rx.chunks.length; i++) n += rx.chunks[i].length;
+    all = new Float32Array(n);
+    for (i = R.fCh; i < rx.chunks.length; i++) { all.set(rx.chunks[i], o); o += rx.chunks[i].length; }
+    R.fCh = rx.chunks.length;
+    name = 'rec-' + R.id + '_' + R.k + '.pcm'; R.k += 1;
+    recWrite(name, new Uint8Array(all.buffer)).catch(function () { R.fail = true; });
+  }
+  // Relit une prise interrompue : blocs concaténés dans l'ordre
+  function recLoad(m) {
+    return recNames('rec-' + m.id + '_').then(function (names) {
+      names = names.filter(function (x) { return /\.pcm$/.test(x); }).sort(function (a, b) { return recK(a) - recK(b); });
+      return Promise.all(names.map(recRead));
+    }).then(function (arrs) {
+      var n = 0, o = 0, x, i;
+      for (i = 0; i < arrs.length; i++) if (arrs[i]) n += arrs[i].length >> 2;
+      x = new Float32Array(n);
+      for (i = 0; i < arrs.length; i++) if (arrs[i]) { var f = new Float32Array(arrs[i].slice().buffer); x.set(f, o); o += f.length; }
+      return { x: x, dur: n / m.sr };
+    });
+  }
+  // Liste les prises non rangées (au démarrage et à l'ouverture d'un son) et propose de les récupérer
+  function recCheck() {
+    if (rx.recBusy || st.recording) return;
+    rx.recBusy = true;
+    recNames('rec-').then(function (names) {
+      var metas = names.filter(function (x) { return /\.json$/.test(x); });
+      return Promise.all(metas.map(function (x) {
+        return recRead(x).then(function (u) { return u ? JSON.parse(new TextDecoder().decode(u)) : null; }).catch(function () { return null; });
+      }));
+    }).then(function (list) {
+      rx.recBusy = false;
+      rx.recList = list.filter(function (m) { return m && m.id && m.sr; });
+      recNext();
+    }).catch(function () { rx.recBusy = false; });
+  }
+  function recNext() {
+    if (rx.offer || rx.recPend) return;
+    var list = (rx.recList || []).filter(function (m) { return (m.projId || null) === (st.projId || null); });
+    if (!list.length || st.recording) { hideRecB(); return; }
+    var m = list[0];
+    if (rx.recLoading === m.id) return;
+    rx.recLoading = m.id;
+    recLoad(m).then(function (r) {
+      rx.recLoading = null;
+      if (rx.recPend || rx.offer) return;
+      rx.recPend = { m: m, x: r.x, dur: r.dur };
+      showRecB('Une prise de ' + fmtDur(r.dur) + ' a été interrompue. Récupérer la prise ?', [
+        { label: 'Récupérer', primary: true, fn: recRecover },
+        { label: 'Ignorer', fn: recIgnore }
+      ]);
+    }).catch(function () { rx.recLoading = null; });
+  }
+  function recRecover() {
+    var p = rx.recPend; if (!p) return;
+    rx.recPend = null; hideRecB();
+    var m = p.m, sr = m.sr, lat = Math.round((m.lat || 0) * sr / 1000), n = p.x.length;
+    rx.recList = (rx.recList || []).filter(function (x) { return x.id !== m.id; });
+    var take = { tid: m.tid, pos: m.pos, sr: sr, lat: m.lat || 0, created: false, instru: !!m.instru, srcs: 0, rid: m.id, recovered: true, mic: null };
+    placeTake(take, [p.x.subarray(Math.min(lat, n))], sr, {});
+    recNext();
+  }
+  function recIgnore() {
+    var p = rx.recPend; rx.recPend = null; hideRecB();
+    if (p) {
+      rx.recList = (rx.recList || []).filter(function (x) { return x.id !== p.m.id; });
+      recRemove('rec-' + p.m.id).catch(noop);
+    }
+    recNext();
+  }
+  function buildRecBanner(p) {
+    var b = el('div', 'as-banner as-info-box as-recb');
+    b.hidden = true;
+    st.ui.recb = b;
+    p.appendChild(b);
+  }
+  function showRecB(msg, acts, kind) {
+    var b = st.ui.recb;
+    if (!b) return;
+    b.innerHTML = '';
+    b.className = 'as-banner ' + (kind === 'err' ? 'as-err-box' : 'as-info-box') + ' as-recb';
+    b.appendChild(el('span', 'as-banner-txt', msg));
+    var row = el('div', 'as-banner-acts');
+    acts.forEach(function (a) { tbtn(row, a.label, a.label, a.fn, a.primary ? 'on' : ''); });
+    b.appendChild(row);
+    b.hidden = false;
+  }
+  function hideRecB() { if (st.ui.recb) { st.ui.recb.hidden = true; st.ui.recb.innerHTML = ''; } }
+  // Prise interrompue : reprise proposée à la fin de la prise (lance un enregistrement à cet endroit)
+  function offerResume(tk, why) {
+    var c = clipOfTake(tk), end = c ? c.start + c.duration : tk.start + tk.duration;
+    rx.offer = tk.id;
+    showRecB('Prise interrompue (' + why + ') : ' + fmtDur(tk.buffer.duration) + ' conservées. Reprendre l’enregistrement à cet endroit ?', [
+      { label: 'Reprendre', primary: true, fn: function () { rx.offer = null; hideRecB(); resumeAt(end); } },
+      { label: 'Non', fn: function () { rx.offer = null; hideRecB(); recNext(); } }
+    ]);
+  }
+  function resumeAt(end) {
+    if (st.recording || st.recPending) return;
+    st.recMode = null; st.playhead = end;
+    startRecording();
+  }
+  // Interruptions (appel, verrouillage, page en arrière-plan, contexte audio ou micro perdu) : la prise est finalisée
+  function recInterrupt(why) {
+    if (!st.recording) return;
+    rx.interrupted = why;
+    setStatus('Prise interrompue : ' + why + '.', true);
+    stopRecording();
+  }
+  function onRecVis() {
+    if (document.hidden) { recInterrupt('appel ou verrouillage de l’écran'); recFlush(); }
+    else ctxWatch();
+  }
+  // Au retour : reprise du contexte ; s'il ne repart pas en 1 s, il est recréé (les buffers sont conservés)
+  function ctxWatch() {
+    var c = st.ctx;
+    if (!c || c.state === 'running') return;
+    try { c.resume().catch(noop); } catch (e) { /* contexte fermé */ }
+    setTimeout(function () {
+      if (st.ctx === c && c.state !== 'running') { recreateCtx(); setStatus('Audio relancé : le contexte ne repartait pas.'); }
+    }, 1000);
+  }
+  function recreateCtx() {
+    var old = st.ctx;
+    if (st.playing) { stopGraph(); st.playing = false; stopTimerIfIdle(); }
+    closeMic();
+    rx.node = null; rx.sp = null; rx.modP = null; rx.nodeMode = '';
+    st.ctx = null;
+    try { if (old && old.close) old.close().catch(noop); } catch (e) { /* déjà fermé */ }
+    st.ctxRebuilds = (st.ctxRebuilds || 0) + 1;
+    var c = getCtx();
+    renderTransport();
+    return c;
+  }
+
+  // ---------- Contrôle de chaque prise : format, traitements, saturation, bruit, trous, dérive ----------
+  var SAT_LEVEL = 0.9886; // -0,1 dBFS
+  function kHzTxt(sr) { return (Math.round(sr / 100) / 10).toString().replace('.', ',') + ' kHz'; }
+  // Canal utile : un seul canal porte le signal (-40 dB sous l'autre) -> ce canal ; sinon les deux restent
+  function chanPick(eL, eR) {
+    if (eL > 0 && eR <= eL * 1e-4) return 'left';
+    if (eR > 0 && eL <= eR * 1e-4) return 'right';
+    return 'both';
+  }
+  function energyOf(f) { var s = 0, i; for (i = 0; i < f.length; i++) s += f[i] * f[i]; return s; }
+  // Trous signalés par le worklet : n échantillons manquants à la position pos (de la prise en cours)
+  function onCapGap(k) { if (rx.on && k > 0) rx.gaps.push({ pos: rx.nSamp, n: k }); }
+  function onCapMsg(e) {
+    var d = e.data;
+    if (d.type === 'data') {
+      if (rx.t0 == null && d.t != null) rx.t0 = d.t;
+      if (d.r) { rx.stereo = true; rx.chR.push(d.r); rx.eL += energyOf(d.data); rx.eR += energyOf(d.r); }
+      onCapData(d.data);
+    } else if (d.type === 'gap') onCapGap(d.n);
+    else if (d.type === 'end') { rx.tEnd = d.t; finishPCM(); }
+  }
+  // Insère du silence aux positions des trous, avec des fondus de 2 ms de part et d'autre
+  function insertGaps(x, gaps, sr) {
+    if (!gaps || !gaps.length) return x;
+    var add = 0, i, p, src = 0, dst = 0, starts = [], out, F = Math.max(1, Math.round(sr * 0.002)), j;
+    for (i = 0; i < gaps.length; i++) add += gaps[i].n;
+    out = new Float32Array(x.length + add);
+    for (i = 0; i < gaps.length; i++) {
+      p = Math.min(gaps[i].pos, x.length);
+      out.set(x.subarray(src, p), dst); dst += p - src; src = p;
+      starts.push(dst); dst += gaps[i].n;
+    }
+    out.set(x.subarray(src), dst);
+    for (i = 0; i < gaps.length; i++) {
+      var s0 = starts[i], L = gaps[i].n;
+      for (j = 0; j < F; j++) {
+        if (s0 - 1 - j >= 0) out[s0 - 1 - j] *= j / F;
+        if (s0 + L + j < out.length) out[s0 + L + j] *= j / F;
+      }
+    }
+    return out;
+  }
+  // Rééchantillonnage linéaire vers une longueur donnée (correction de dérive)
+  function resampleTo(x, len) {
+    var out = new Float32Array(len), r = (x.length - 1) / Math.max(1, len - 1), i, p, k, f;
+    for (i = 0; i < len; i++) {
+      p = i * r; k = Math.floor(p); f = p - k;
+      out[i] = x[k] * (1 - f) + (k + 1 < x.length ? x[k + 1] : x[k]) * f;
+    }
+    return out;
+  }
+  // Contrôle d'une prise (après trous et dérive corrigés) ; résultat rangé avec la prise
+  function takeCheck(x, sr, info) {
+    var n = x.length, i, v, cnt = 0, pk = 0, warns = [], infos = [], m = info.mic || null, s, j, F, fr = [];
+    for (i = 0; i < n; i++) { v = Math.abs(x[i]); if (v > pk) pk = v; if (v >= SAT_LEVEL) cnt++; }
+    var sat = n ? cnt / n * 100 : 0;
+    F = Math.max(1, Math.round(sr * 0.01));
+    for (i = 0; i + F <= n; i += F) { s = 0; for (j = i; j < i + F; j++) s += x[j] * x[j]; fr.push(10 * Math.log10(s / F + 1e-20)); }
+    fr.sort(function (a, b) { return a - b; });
+    var floorDb = fr.length ? fr[Math.floor(fr.length * 0.1)] : -Infinity;
+    var gapN = (info.gaps || []).length, gapS = 0;
+    (info.gaps || []).forEach(function (g) { gapS += g.n; });
+    var ch = m && m.ch > 1 ? 'stéréo' : 'mono', proc = 'aucun';
+    if (m) { var pr = []; if (m.ec) pr.push('écho'); if (m.ns) pr.push('bruit'); if (m.agc) pr.push('gain auto'); if (pr.length) proc = pr.join(', '); }
+    if (m && m.sr && Math.abs(m.sr - sr) > 1) infos.push('micro à ' + kHzTxt(m.sr) + ', rééchantillonné à ' + kHzTxt(sr));
+    if (gapN) warns.push(gapN + ' micro-coupure' + (gapN > 1 ? 's' : '') + ' détectée' + (gapN > 1 ? 's' : '') + ' (' + fr1(gapS / sr * 1000, 0) + ' ms au total), silence inséré');
+    if (info.driftMs != null && Math.abs(info.driftMs) > 5) warns.push('dérive de ' + fr1(Math.abs(info.driftMs), 0) + ' ms corrigée');
+    if (sat > 0.1) warns.push('Saturation : ' + fr1(sat, 1) + ' % — baisse le gain ou éloigne le micro');
+    if (info.leftOnly) infos.push('canal gauche seul : utilisé pour les deux canaux');
+    if (info.rightOnly) infos.push('canal droit seul : utilisé pour les deux canaux');
+    return { sr: sr, ch: ch, proc: proc, sat: sat, floorDb: floorDb, peakDb: 20 * Math.log10(pk + 1e-12), gaps: gapN, gapMs: gapS / sr * 1000, driftMs: info.driftMs == null ? null : info.driftMs, warns: warns, infos: infos, ok: warns.length === 0 };
+  }
+  function checkNote(c) {
+    if (!c) return '';
+    return c.warns.length ? ' Contrôle : ' + c.warns.join(' ; ') + '.' : ' Contrôle OK.';
+  }
+  // Résumé d'une prise (feuille « Ta prise ») : format, traitements, avertissements (✓ / ⚠)
+  function checkLine(tk) {
+    var c = tk.check;
+    if (!c) return '';
+    var floor = !isFinite(c.floorDb) ? '' : (c.floorDb <= -100 ? ' · bruit de fond nul' : ' · bruit de fond ' + fr1(c.floorDb, 0) + ' dB');
+    var head = kHzTxt(c.sr) + ' · ' + c.ch + ' · traitements : ' + c.proc + floor;
+    var tail = c.warns.length ? '⚠ ' + c.warns.join(' ; ') : '✓ Contrôle OK';
+    var info = c.infos && c.infos.length ? ' (' + c.infos.join(' ; ') + ')' : '';
+    return head + ' — ' + tail + info;
+  }
+
+  // ---------- Calibrage automatique de la latence (boucle acoustique) ----------
+  // Une séquence MLS (8191 échantillons) jouée 5 fois par la sortie normale, captée par la même chaîne que les prises,
+  // corrélée au signal émis : latence = position du pic − instant d'émission. Fiable si pic / médiane ≥ 18 dB.
+  var CAL_ORDER = 13, CAL_WIN = 1.15, CAL_T0 = 0.4, CAL_GAP = 1.2, CAL_NEMIT = 5;
+  var CAL_MIN_RATIO = 18, CAL_MAX_SD = 5;
+  var LATMAP_KEY = 'sf_audio_latmap';
+  function mlsSeq() {
+    var N = (1 << CAL_ORDER) - 1, reg = 1, out = new Float32Array(N), i, t, fb;
+    var taps = [0, 1, 3, 4]; // polynôme primitif x^13 + x^4 + x^3 + x + 1 : période 8191
+    for (i = 0; i < N; i++) {
+      out[i] = (reg & 1) ? 0.5 : -0.5;
+      fb = 0; for (t = 0; t < taps.length; t++) fb ^= (reg >> taps[t]) & 1;
+      reg = (reg >> 1) | (fb << (CAL_ORDER - 1));
+    }
+    return out;
+  }
+  // Corrélation croisée par FFT (autonome : exécutée dans un Worker créé à partir d'un Blob, ou sur le fil principal)
+  // emits : [{ s, f }] = début entier de la fenêtre dans l'enregistrement et fraction de l'instant d'émission
+  function calibCore(tpl, rec, sr, emits, win) {
+    function fft(re, im, inv) {
+      var n = re.length, i, j, k, len, half, step, wr, wi, ur, ui, vr, vi, t1, bit;
+      var tc = new Float64Array(n / 2), ts = new Float64Array(n / 2);
+      for (i = 0; i < n / 2; i++) { tc[i] = Math.cos(2 * Math.PI * i / n); ts[i] = (inv ? 1 : -1) * Math.sin(2 * Math.PI * i / n); }
+      for (i = 1, j = 0; i < n; i++) {
+        bit = n >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit;
+        if (i < j) { t1 = re[i]; re[i] = re[j]; re[j] = t1; t1 = im[i]; im[i] = im[j]; im[j] = t1; }
+      }
+      for (len = 2; len <= n; len <<= 1) {
+        half = len >> 1; step = n / len;
+        for (i = 0; i < n; i += len) {
+          for (k = 0; k < half; k++) {
+            wr = tc[k * step]; wi = ts[k * step];
+            ur = re[i + k]; ui = im[i + k];
+            vr = re[i + k + half] * wr - im[i + k + half] * wi;
+            vi = re[i + k + half] * wi + im[i + k + half] * wr;
+            re[i + k] = ur + vr; im[i + k] = ui + vi;
+            re[i + k + half] = ur - vr; im[i + k + half] = ui - vi;
+          }
+        }
+      }
+      if (inv) for (i = 0; i < n; i++) { re[i] /= n; im[i] /= n; }
+    }
+    var tl = tpl.length, N = 1, e, s, len, i, aR, aI, tR, tI, pk, p, lags, vals, med, out = [];
+    while (N < win + tl) N <<= 1;
+    tR = new Float64Array(N); tI = new Float64Array(N);
+    for (i = 0; i < tl; i++) tR[i] = tpl[i];
+    fft(tR, tI, false);
+    for (e = 0; e < emits.length; e++) {
+      s = emits[e].s;
+      len = Math.min(win, rec.length - s);
+      if (len < tl + 1) { out.push(null); continue; }
+      aR = new Float64Array(N); aI = new Float64Array(N);
+      for (i = 0; i < len; i++) aR[i] = rec[s + i];
+      fft(aR, aI, false);
+      for (i = 0; i < N; i++) { // A · conj(T)
+        var xr = aR[i], xi = aI[i], yr = tR[i], yi = -tI[i];
+        aR[i] = xr * yr - xi * yi; aI[i] = xr * yi + xi * yr;
+      }
+      fft(aR, aI, true);
+      lags = len - tl + 1; pk = -1; p = 0; vals = new Float64Array(lags);
+      for (i = 0; i < lags; i++) { var m = Math.abs(aR[i]); vals[i] = m; if (m > pk) { pk = m; p = i; } }
+      vals.sort();
+      med = Math.max(vals[vals.length >> 1], pk * 1e-6); // plancher : signal presque nul ne donne pas un rapport infini
+      out.push({ p: p, f: emits[e].f, ratio: 20 * Math.log10((pk + 1e-12) / (med + 1e-12)) });
+    }
+    return out;
+  }
+  function calibRun(tpl, rec, sr, emits, win) {
+    return new Promise(function (resolve) {
+      var w = null;
+      try {
+        var src = 'var calibCore=' + calibCore.toString() + ';self.onmessage=function(e){var d=e.data;self.postMessage(calibCore(d.tpl,d.rec,d.sr,d.emits,d.win));};';
+        w = new Worker(URL.createObjectURL(new Blob([src], { type: 'application/javascript' })));
+      } catch (err) { w = null; }
+      if (!w) { resolve(calibCore(tpl, rec, sr, emits, win)); return; }
+      w.onmessage = function (e) { w.terminate(); resolve(e.data); };
+      w.onerror = function () { w.terminate(); resolve(calibCore(tpl, rec, sr, emits, win)); };
+      w.postMessage({ tpl: tpl, rec: rec, sr: sr, emits: emits, win: win });
+    });
+  }
+  function medianOf(a) { var b = a.slice().sort(function (p, q) { return p - q; }); return b.length ? b[b.length >> 1] : 0; }
+  // Verdict : mesures fiables (pic / médiane ≥ 18 dB, latence plausible), au moins 3, écart-type ≤ 5 ms ; résultat = médiane
+  function calibJudge(res, sr) {
+    var good = [], ratios = [], i, r, lat, mean = 0, sd = 0, lats;
+    for (i = 0; i < res.length; i++) {
+      r = res[i]; if (!r) continue;
+      lat = (r.p - r.f) / sr * 1000; ratios.push(r.ratio);
+      if (r.ratio >= CAL_MIN_RATIO && lat >= -5 && lat <= LAT_MAX) good.push({ ms: lat, ratio: r.ratio });
+    }
+    var rel = medianOf(ratios);
+    if (good.length < 3) return { ok: false, n: good.length, rel: rel, sd: null, incoherent: false, pair: null };
+    lats = good.map(function (g) { return g.ms; });
+    for (i = 0; i < lats.length; i++) mean += lats[i];
+    mean /= lats.length;
+    for (i = 0; i < lats.length; i++) sd += (lats[i] - mean) * (lats[i] - mean);
+    sd = Math.sqrt(sd / lats.length);
+    if (sd > CAL_MAX_SD) return { ok: false, n: good.length, rel: rel, sd: sd, incoherent: true, pair: null };
+    return { ok: true, ms: Math.round(medianOf(lats)), rel: medianOf(good.map(function (g) { return g.ratio; })), n: good.length, sd: sd, pair: null };
+  }
+  function calAutoMsg(msg, err) { rx.acalMsg = msg || ''; rx.acalErr = !!err; renderAutoUI(); if (msg) setStatus(msg, err); }
+  // Étape 1 : instructions (le son ne part qu'au second clic, geste utilisateur exigé par iOS)
+  function calAutoStart() {
+    if (rx.acalBusy) return;
+    if (st.recording || st.recPending || rx.ending || rx.cal || VC.busy) { setStatus('Mesure impossible pendant un enregistrement ou une vérification.', true); return; }
+    if (micUnavailable()) { showMicError(null); return; }
+    var c = getCtx();
+    if (!window.AudioWorkletNode || !c.audioWorklet) { calAutoMsg('Mesure automatique indisponible sur ce navigateur (AudioWorklet absent). Utilise les préréglages.', true); return; }
+    rx.acalReady = true; rx.acal = null;
+    calAutoMsg('Pose un écouteur du casque contre le micro (ou monte le volume des haut-parleurs), puis garde le silence 5 secondes. Le signal dure environ 6 secondes ; lance la mesure quand tu es prêt.');
+  }
+  function calAutoCancel() { rx.acalReady = false; rx.acal = null; calAutoMsg(''); }
+  // Étape 2 : mesure (micro ouvert sans traitement de voix, émission, capture, analyse)
+  function calAutoGo() {
+    if (rx.acalBusy || !rx.acalReady) return;
+    var c = getCtx();
+    if (c.state !== 'running') c.resume().catch(noop);
+    rx.acalBusy = true; rx.acalReady = false; rx.acal = null;
+    calAutoMsg('Ouverture du micro…');
+    openMic().then(function () { return ensureCapture(c); }).then(function () {
+      if (!rx.ig) throw new Error('micro indisponible');
+      calAutoMsg('Mesure en cours : silence pendant 5 secondes…');
+      return calAutoCapture(c);
+    }).then(function (r) {
+      calAutoMsg('Analyse du signal…');
+      return calAutoAnalyse(r);
+    }).then(function (v) {
+      rx.acalBusy = false; rx.acal = v; v.pair = pairKey();
+      if (v.ok) calAutoMsg('Retard mesuré : ' + v.ms + ' ms (fiabilité ' + fr1(v.rel, 0) + ' dB, ' + v.n + '/5 mesures)');
+      else calAutoMsg(calFailText(v), true);
+      if (!st.recording && !st.mic.monitor && !rx.testing) closeMic();
+    }).catch(function (err) {
+      rx.acalBusy = false; rx.acal = null;
+      if (!st.recording && !st.mic.monitor && !rx.testing) closeMic();
+      if (err && /NotAllowed|Security|NotFound|NotReadable|Overconstrained/.test(err.name || '')) { showMicError(err); calAutoMsg(''); }
+      else calAutoMsg('Mesure impossible : ' + ((err && err.message) || 'erreur inconnue') + '.', true);
+    });
+  }
+  function calFailText(v) {
+    var why = v.incoherent
+      ? 'mesures incohérentes (écart-type ' + fr1(v.sd || 0, 1) + ' ms, au plus 5 ms)'
+      : v.n + '/5 mesures assez nettes (il en faut 3, avec une fiabilité d’au moins ' + CAL_MIN_RATIO + ' dB)';
+    return 'Mesure non fiable : ' + why + '. Monte le volume, rapproche un écouteur du micro, coupe l’anti-écho, ou choisis un préréglage (Filaire ≈ 40 ms, Bluetooth ≈ 250 ms).';
+  }
+  function calAutoCapture(c) {
+    var sr = c.sampleRate, tr = rx.stream && rx.stream.getAudioTracks ? rx.stream.getAudioTracks()[0] : null, tpl = mlsSeq(), k, E = [];
+    var c0 = c.currentTime + 0.25;
+    if (tr && tr.applyConstraints) tr.applyConstraints({ echoCancellation: false, noiseSuppression: false, autoGainControl: false }).catch(noop);
+    for (k = 0; k < CAL_NEMIT; k++) E.push(c0 + CAL_T0 + k * CAL_GAP);
+    var buf = c.createBuffer(1, tpl.length, sr);
+    buf.getChannelData(0).set(tpl);
+    var node = new AudioWorkletNode(c, 'sf-cap', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [1] });
+    var chunks = [], n = 0, t0 = null;
+    return new Promise(function (resolve, reject) {
+      var done = false, watchdog = null;
+      function finish() {
+        if (done) return; done = true; clearTimeout(watchdog);
+        try { node.port.postMessage({ type: 'stop' }); } catch (e) { /* port fermé */ }
+        try { rx.ig.disconnect(node); } catch (e) { /* lien absent */ }
+        try { node.disconnect(); } catch (e) { /* déjà déconnecté */ }
+        if (t0 == null) { reject(new Error('aucun signal capté')); return; }
+        var rec = new Float32Array(n), o = 0, i;
+        for (i = 0; i < chunks.length; i++) { rec.set(chunks[i], o); o += chunks[i].length; }
+        resolve({ rec: rec, t0: t0, sr: sr, E: E, tpl: tpl });
+      }
+      node.port.onmessage = function (e) {
+        var d = e.data;
+        if (d.type === 'data') { if (t0 == null) t0 = d.t; chunks.push(d.data); n += d.data.length; }
+        else if (d.type === 'gap') { chunks.push(new Float32Array(d.n)); n += d.n; }
+        else if (d.type === 'end') finish();
+      };
+      rx.ig.connect(node); node.connect(rx.zero);
+      var g = c.createGain(); g.gain.value = 1; g.connect(c.destination);
+      for (k = 0; k < CAL_NEMIT; k++) { var s = c.createBufferSource(); s.buffer = buf; s.connect(g); s.start(E[k]); }
+      node.port.postMessage({ type: 'start', at: c0 });
+      var stopAt = E[CAL_NEMIT - 1] + CAL_WIN + 0.2, ms = Math.max(0, (stopAt - c.currentTime) * 1000);
+      setTimeout(function () { try { node.port.postMessage({ type: 'stop' }); } catch (e) { /* port fermé */ } }, ms);
+      watchdog = setTimeout(finish, ms + 1500);
+    });
+  }
+  function calAutoAnalyse(r) {
+    var sr = r.sr, emits = [], k, tt;
+    for (k = 0; k < CAL_NEMIT; k++) { tt = (r.E[k] - r.t0) * sr; emits.push({ s: Math.floor(tt), f: tt - Math.floor(tt) }); }
+    return calibRun(r.tpl, r.rec, sr, emits, Math.round(CAL_WIN * sr)).then(function (res) { return calibJudge(res, sr); });
+  }
+  function calAutoApply() {
+    var v = rx.acal;
+    if (!v || !v.ok) return;
+    setLatency(v.ms);
+    var m = loadLatMap(); m[v.pair] = v.ms; saveLatMap(m);
+    rx.acal = null;
+    calAutoMsg('Latence appliquée : ' + v.ms + ' ms. Mémorisée pour ce casque et ce micro.');
+  }
+  // Mémoire par couple sortie / entrée (libellés) : réappliquée quand le couple revient
+  function loadLatMap() { try { return JSON.parse(window.localStorage.getItem(LATMAP_KEY) || '{}') || {}; } catch (e) { return {}; } }
+  function saveLatMap(m) { try { window.localStorage.setItem(LATMAP_KEY, JSON.stringify(m)); } catch (e) { /* stockage indisponible */ } }
+  function pairKey() { return (outLabelNow() || 'sortie par défaut') + ' | ' + (inLabelNow() || 'entrée par défaut'); }
+  function pairLatency() { var v = loadLatMap()[pairKey()]; return typeof v === 'number' ? v : null; }
+  function applyPairLatency() {
+    var v = pairLatency();
+    if (v == null || v === st.mic.latency || st.recording) return;
+    st.mic.latency = clamp(Math.round(v), 0, LAT_MAX); saveLatency();
+  }
+  // Bloc « Mesurer automatiquement » (réglages et « Ton casque ») : instructions, mesure, résultat
+  function buildAutoUI(parent) {
+    var a = { box: el('div', 'as-acal'), msg: el('div', 'as-acal-msg'), note: el('div', 'as-note-b') };
+    a.msg.setAttribute('role', 'status'); a.msg.setAttribute('aria-live', 'polite');
+    a.note.hidden = true;
+    a.box.appendChild(a.note);
+    a.box.appendChild(a.msg);
+    var row = el('div', 'as-gopts');
+    a.start = cbtn(row, 'cal', 'Mesurer automatiquement', 'xl', calAutoStart);
+    a.go = cbtn(row, 'test', 'Lancer la mesure', 'keep', calAutoGo);
+    a.apply = cbtn(row, 'check', 'Appliquer et mémoriser', 'keep', calAutoApply);
+    a.cancel = cbtn(row, 'close', 'Annuler', '', calAutoCancel);
+    a.box.appendChild(row);
+    (st.ui.acalUI = st.ui.acalUI || []).push(a);
+    parent.appendChild(a.box);
+    return a;
+  }
+  function renderAutoUI() {
+    var busy = !!rx.acalBusy, blocked = !!(st.recording || st.recPending || rx.ending || rx.cal);
+    (st.ui.acalUI || []).forEach(function (a) {
+      a.msg.textContent = rx.acalMsg || '';
+      a.msg.className = 'as-acal-msg' + (rx.acalErr ? ' as-err' : '');
+      a.msg.hidden = !rx.acalMsg;
+      a.start.hidden = busy || rx.acalReady;
+      a.start.disabled = blocked;
+      a.start._lbl.textContent = rx.acal ? 'Recommencer' : 'Mesurer automatiquement';
+      a.go.hidden = busy || !rx.acalReady;
+      a.cancel.hidden = busy || !rx.acalReady;
+      a.apply.hidden = busy || !(rx.acal && rx.acal.ok);
+      var pl = pairLatency();
+      a.note.hidden = pl == null;
+      a.note.textContent = pl == null ? '' : 'Latence calibrée pour ce casque + ce micro : ' + pl + ' ms (réappliquée automatiquement).';
+    });
   }
 
   // Calibrage : 8 clics dans le casque, tap en rythme ; médiane du décalage (tap - clic attendu)
@@ -7259,6 +7881,7 @@ select.ie-in{width:auto}
     syncMicNote();
     syncOutUI();
     updateDiags();
+    renderAutoUI();
   }
 
   // Niveau d'entrée (vumètre) : pic et RMS du flux micro, mis à jour à chaque image
@@ -9175,6 +9798,7 @@ select.ie-in{width:auto}
     s.apply = ibtn(crow, '', 'Appliquer la valeur', 'Applique la valeur proposée par le calibrage', function () { if (rx.calVal != null) setLatency(rx.calVal); }, 'as-wide');
     s.apply.hidden = true;
     secLat.appendChild(crow);
+    s.acal = buildAutoUI(secLat);
     s.tap = el('button', 'as-tap', 'TAP');
     s.tap.type = 'button';
     s.tap.hidden = true;
@@ -9340,16 +9964,39 @@ select.ie-in{width:auto}
     st.booth.prev = null; st.booth.prevId = null;
     if (s) { s.onended = null; try { s.stop(); } catch (e) { /* déjà arrêté */ } }
   }
+  var keepVid = null, keepT = null;
   function wakeOn() {
     try {
       if (navigator.wakeLock && navigator.wakeLock.request) {
         navigator.wakeLock.request('screen').then(function (s) { wake = s; }, noop);
+        return;
       }
-    } catch (e) { /* verrou d'écran indisponible */ }
+    } catch (e) { /* verrou d'écran refusé : repli ci-dessous */ }
+    keepOn();
+  }
+  // Repli sans Wake Lock : petit flux vidéo muet, alimenté par un canevas redessiné chaque seconde
+  function keepOn() {
+    try {
+      if (!keepVid) {
+        var cv = document.createElement('canvas'), cx = cv.getContext('2d');
+        cv.width = 2; cv.height = 2;
+        keepT = setInterval(function () { cx.fillStyle = (Date.now() % 2000 < 1000) ? '#000' : '#010101'; cx.fillRect(0, 0, 2, 2); }, 1000);
+        keepVid = document.createElement('video');
+        keepVid.muted = true; keepVid.loop = true; keepVid.setAttribute('playsinline', ''); keepVid.setAttribute('aria-hidden', 'true');
+        keepVid.style.cssText = 'position:fixed;width:2px;height:2px;opacity:0;pointer-events:none;left:0;top:0';
+        keepVid.srcObject = cv.captureStream(1);
+        (st.root || document.body).appendChild(keepVid);
+      }
+      var p = keepVid.play();
+      if (p && p.catch) p.catch(noop);
+      setStatus('Enregistrement en cours. Garde l’écran allumé (repli sans verrou d’écran).');
+    } catch (e) { /* repli indisponible */ }
   }
   function wakeOff() {
     try { if (wake && wake.release) wake.release().catch(noop); } catch (e) { /* ignore */ }
     wake = null;
+    if (keepT) { clearInterval(keepT); keepT = null; }
+    if (keepVid) { try { keepVid.pause(); } catch (e) { /* ignore */ } }
   }
 
   // ---------- Cabine : instru, casque, enregistrement, prises, mixage ----------
@@ -10538,6 +11185,9 @@ select.ie-in{width:auto}
     body.appendChild(hm);
     u.tkNote = el('div', 'as-takec-sum', '');
     body.appendChild(u.tkNote);
+    u.tkCheck = el('div', 'as-takec-sum as-tkchk', '');
+    u.tkCheck.hidden = true;
+    body.appendChild(u.tkCheck);
     // Voix ↔ Beat
     var bal = el('div', 'as-tbal');
     var bH = el('div', 'as-tbal-h');
@@ -10790,7 +11440,11 @@ select.ie-in{width:auto}
     var tk = takeById(st.booth.tkId);
     if (!tk || st.recording) { closeOv(u.shTake); return; }
     var fx = takeFx(tk), act = isActive(tk), busy = st.booth.fxBusy;
-    u.tkTitle.textContent = 'Prise ' + tk.num + ' · ' + fmtDur(tk.buffer.duration);
+    u.tkTitle.textContent = 'Prise ' + tk.num + ' · ' + fmtDur(tk.buffer.duration) + (tk.interrupted ? ' · interrompue' : '');
+    var ckl = checkLine(tk);
+    u.tkCheck.hidden = !ckl;
+    u.tkCheck.textContent = ckl;
+    u.tkCheck.className = 'as-takec-sum as-tkchk' + (tk.check && !tk.check.ok ? ' as-tkchk-warn' : '');
     if (u.tkFor !== tk.buffer) { u.tkFor = tk.buffer; drawMini(u.tkWave, tk.buffer); }
     setSw(u.tkSync, fx.sync); setSw(u.tkDen, fx.den); setSw(u.tkTune, !!fx.tune);
     setSw(u.tkPro, vproOn());
@@ -11827,7 +12481,7 @@ select.ie-in{width:auto}
       st.projId = id;
       st.sess.found = r;
       st.bview = 'studio';
-      return restoreSession().then(function () { renderBooth(); if (then) then(); });
+      return restoreSession().then(function () { renderBooth(); recCheck(); if (then) then(); });
     }).catch(function (err) {
       showBanner('Ouverture impossible (' + ((err && err.message) || 'erreur') + ').', 'err', null);
     });
@@ -12512,7 +13166,7 @@ select.ie-in{width:auto}
     st.root = rootEl;
     rootEl.innerHTML = '';
     var style = el('style');
-    style.textContent = CSS + '\n' + CSS_SYNC + '\n' + CSS_CAB + '\n' + CSS_TUNE + '\n' + CSS_V4;
+    style.textContent = CSS + '\n' + CSS_SYNC + '\n' + CSS_CAB + '\n' + CSS_TUNE + '\n' + CSS_V4 + '\n' + CSS_P3;
     rootEl.appendChild(style);
     var wrap = el('div', 'as-root');
     rootEl.appendChild(wrap);
@@ -12523,6 +13177,7 @@ select.ie-in{width:auto}
     buildTransport(wrap);
     buildBanner(wrap);
     buildSessBanner(wrap);
+    buildRecBanner(wrap);
     buildFileBar(wrap);
     buildGenPanel(wrap);
     buildTabs(wrap);
@@ -12552,8 +13207,11 @@ select.ie-in{width:auto}
     showTab(st.narrow ? 'booth' : 'edit');
     updateHistBtns();
     document.addEventListener('visibilitychange', onHide);
-    window.addEventListener('pagehide', flushSave);
+    document.addEventListener('visibilitychange', onRecVis);
+    window.addEventListener('pagehide', function () { recFlush(); flushSave(); });
+    document.addEventListener('freeze', function () { recInterrupt('page suspendue'); recFlush(); });
     loadIndex();
+    setTimeout(recCheck, 600);
   }
 
   // ---------- Recalage voix / temps (« Recaler sur le temps ») : moteur ----------
@@ -13409,6 +14067,16 @@ select.ie-in{width:auto}
   }
 
   // Styles de la Cabine v4 (mini-timeline, barre d'actions, feuille « Modifier l’instru », mixage auto)
+  // Partie 3 : bandeau de récupération, calibrage automatique, contrôle de prise (couleurs du thème)
+  var CSS_P3 = [
+    '.as-recb{margin:8px 10px;flex-wrap:wrap;}',
+    '.as-recb>.as-banner-txt{flex:1 1 100%;}',
+    '.as-acal{display:flex;flex-direction:column;gap:8px;margin:10px 0;}',
+    '.as-acal-msg{font-size:13px;line-height:1.45;color:var(--text);}',
+    '.as-acal-msg.as-err{color:var(--warn);}',
+    '.as-tkchk{font-family:var(--mono);font-size:12px;font-variant-numeric:tabular-nums;}',
+    '.as-tkchk.as-tkchk-warn{color:var(--warn);}'
+  ].join('\n');
   var CSS_V4 = [
     '.as-sync-row>.as-sgrid,.as-sync-row>.as-sab{flex:1 1 auto;min-width:0;max-width:100%;width:auto;min-height:40px;white-space:normal;text-align:center;line-height:1.15;}',
     '.as-tlz{gap:8px;padding:10px 10px 12px;}',
@@ -14874,6 +15542,18 @@ select.ie-in{width:auto}
         takes: st.takes.map(function (k) { return { id: k.id, trackId: k.trackId, num: k.num, dur: k.buffer.duration, active: isActive(k), fx: k.fx || null, nudge: k.nudge || 0 }; }),
         key: st.key, layer: st.booth.layer, tune: st.booth.tune, harm: st.booth.harm, fxBusy: st.booth.fxBusy, keyBusy: st.booth.keyBusy,
         worker: SY_W ? 'ok' : (SY_WBAD ? 'bad' : 'none'),
+        // Hooks de test : moteur de calibrage, contrôle, persistance des prises, injection de trous et de blocs
+        calib: { core: calibCore, judge: calibJudge, mls: mlsSeq, run: calibRun, latency: function () { return rx.acal; },
+          show: function (ms, rel, n) { rx.acal = { ok: true, ms: ms, rel: rel, n: n, sd: 0, pair: pairKey() }; rx.acalMsg = 'Retard mesuré : ' + ms + ' ms (fiabilité ' + fr1(rel, 0) + ' dB, ' + n + '/5 mesures)'; rx.acalErr = false; renderAutoUI(); } },
+        check: { take: takeCheck, line: checkLine, insertGaps: insertGaps, resample: resampleTo, pick: chanPick },
+        rec: { kind: recSt.kind, active: rx.rec ? rx.rec.id : null, blocks: rx.rec ? rx.rec.k : 0, fail: rx.rec ? rx.rec.fail : false,
+          list: (rx.recList || []).length, offer: rx.offer, pend: rx.recPend ? rx.recPend.dur : null,
+          names: function () { return recNames('rec-'); }, raw: function (n) { return recRead(n); } },
+        micSet: rx.micSet,
+        ctxRebuilds: st.ctxRebuilds || 0,
+        hooks: { gap: onCapGap, msg: onCapMsg, flush: recFlush, interrupt: recInterrupt, check: recCheck, resume: resumeAt },
+        pair: pairKey(),
+        pairLat: pairLatency(),
         session: { pending: st.sess.pending, saved: Object.keys(st.sess.saved).length, bufs: st.sess.bufs.length }
       };
     }
